@@ -1,0 +1,29 @@
+[package]
+name = "codrop-transport"
+description = "Codrop Phase 2: QUIC peer transport, mDNS discovery, index/blob sync."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "codrop_transport"
+path = "src/lib.rs"
+
+[[bin]]
+name = "codrop-net"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+codrop-sync-engine.workspace = true
+quinn.workspace = true
+rustls.workspace = true
+rcgen.workspace = true
+tokio.workspace = true
+mdns-sd.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
