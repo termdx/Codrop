@@ -12,13 +12,10 @@ macOS File Provider extension in Swift) will live in sibling top-level directori
 ```
 codrop/
 ├── Cargo.toml                  # workspace root: shared deps + metadata
-├── crates/
-│   ├── watcher-daemon/         # codrop-watchd — watches the tree, feeds the engine
-│   │   └── src/main.rs
-│   └── sync-engine/            # codrop-sync-engine — CAS + SQLite index + vector clocks
-│       ├── src/{lib,engine,store,index,vclock}.rs
-│       └── tests/integration.rs
-└── README.md
+└── crates/
+    ├── watcher-daemon/         # codrop-watchd — watches the tree, feeds the engine
+    ├── sync-engine/            # codrop-sync-engine — CAS + SQLite index + vector clocks
+    └── transport/              # codrop-transport / codrop-net — QUIC + mDNS peer sync
 ```
 
 ### Build phases
@@ -26,28 +23,46 @@ codrop/
 | Component | Where | Status |
 |---|---|---|
 | `watcher-daemon` | `crates/watcher-daemon` | ✅ Phase 0 — debounced FS watcher, ignore rules, manifest dry-run |
-| `sync-engine` | `crates/sync-engine` | ✅ Phase 1 — content-addressed store, SQLite index, vector clocks, `clonefile()` materialization |
-| `transport` | `crates/transport` | ⬜ Phase 2 — QUIC (`quinn`) + mDNS (`mdns-sd`) peer sync |
+| `sync-engine` | `crates/sync-engine` | ✅ Phase 1 — content-addressed store, SQLite index, vector clocks, `clonefile()` |
+| `transport` | `crates/transport` | ✅ Phase 2 — QUIC peer transport, index/blob sync, mDNS discovery |
 | `delta` | `crates/delta` | ⬜ Phase 3 — `fast_rsync` / FastCDC for large in-place files |
 | conflict engine | `crates/sync-engine` | ⬜ Phase 4 — conflicted-copies from concurrent vector clocks |
 | File Provider ext | `apple/` (Swift) | ⬜ Phase 5 — macOS lazy VFS over XPC to the Rust core |
 
-## How Phase 1 fits together
+## How sync works (Phases 1–2)
 
-The watcher detects a change and calls `Engine::observe(path)`, which:
+1. The **watcher** detects a change and calls `Engine::observe(path)`, which content-addresses
+   the bytes into `.codrop/blobs/`, and — if the hash changed — bumps this device's **vector
+   clock** and upserts the row in `.codrop/index.sqlite`.
+2. A peer **pulls** over QUIC: it fetches the server's index, and for each record asks the
+   engine to `evaluate` it against local state via vector-clock comparison →
+   `Skip` / `Fetch` / `Conflict`.
+3. `Fetch` requests the blob, then `apply_remote` materializes the file and records the
+   **merged** clock. Because the index now holds that content's hash, the watcher's later
+   `observe()` of the written file is a no-op — that idempotency is what kills sync echo loops.
+   `Conflict` (concurrent edits) is logged and deferred to Phase 4.
 
-1. reads the file and stores its bytes in the **content-addressed blob store**
-   (`.codrop/blobs/objects/<hash>`), deduping identical content;
-2. looks up the previous record in the **SQLite index** (`.codrop/index.sqlite`);
-3. if the content hash changed, bumps this device's **vector clock** and upserts the row.
-
-Vector clocks (not wall-clock time) give a clean causal order, so Phase 4 can detect
-*concurrent* edits as true conflicts instead of silently losing one side.
-
-## Build & run
+## Build, test, run
 
 ```bash
-cargo build                                  # build the workspace
-cargo test  -p codrop-sync-engine            # engine unit/integration tests
+cargo build
+cargo test  -p codrop-sync-engine     # CAS / index / vector-clock tests
+cargo test  -p codrop-transport       # two engines converge over QUIC (loopback)
 cargo run   -p codrop-watchd -- /path/to/watch
 ```
+
+### Two-node demo (`codrop-net`)
+
+```bash
+# terminal 1 — scan a tree and serve it
+cargo run -p codrop-transport --bin codrop-net -- serve ~/projectA 127.0.0.1:4500
+
+# terminal 2 — pull it into a fresh folder
+cargo run -p codrop-transport --bin codrop-net -- pull ~/projectB 127.0.0.1:4500
+
+# browse the LAN for peers advertising _codrop._tcp
+cargo run -p codrop-transport --bin codrop-net -- discover
+```
+
+> Note: `.env` files currently sync in the clear. End-to-end encryption + selective-sync
+> policy for secrets is Phase 7 — don't point this at real secrets yet.
