@@ -9,7 +9,7 @@ pub mod index;
 pub mod store;
 pub mod vclock;
 
-pub use engine::{Engine, Observation};
+pub use engine::{Engine, Observation, SyncAction};
 pub use index::{FileRecord, Index};
 pub use store::BlobStore;
 pub use vclock::{Causality, VClock};

@@ -31,11 +31,9 @@ impl BlobStore {
         self.object_path(hash).exists()
     }
 
-    /// Read a file, hash it, and store its bytes under that hash. Returns the hex digest.
-    /// Re-storing identical content is a no-op.
-    pub fn put_path(&self, src: &Path) -> Result<String> {
-        let bytes = fs::read(src).with_context(|| format!("reading {}", src.display()))?;
-        let hash = blake3::hash(&bytes).to_hex().to_string();
+    /// Store raw bytes under their BLAKE3 hash. Returns the hex digest. Idempotent.
+    pub fn put_bytes(&self, bytes: &[u8]) -> Result<String> {
+        let hash = blake3::hash(bytes).to_hex().to_string();
         let dst = self.object_path(&hash);
         if !dst.exists() {
             if let Some(parent) = dst.parent() {
@@ -43,10 +41,26 @@ impl BlobStore {
             }
             // Write atomically (temp + rename) so a crash never leaves a partial object.
             let tmp = dst.with_extension("tmp");
-            fs::write(&tmp, &bytes)?;
+            fs::write(&tmp, bytes)?;
             fs::rename(&tmp, &dst)?;
         }
         Ok(hash)
+    }
+
+    /// Read a file and store its bytes. Returns the hex digest.
+    pub fn put_path(&self, src: &Path) -> Result<String> {
+        let bytes = fs::read(src).with_context(|| format!("reading {}", src.display()))?;
+        self.put_bytes(&bytes)
+    }
+
+    /// Read a stored blob's bytes, if present (the wire-serve path for peers).
+    pub fn read(&self, hash: &str) -> Result<Option<Vec<u8>>> {
+        let path = self.object_path(hash);
+        if path.exists() {
+            Ok(Some(fs::read(path)?))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Materialize a stored blob to `dest`, preferring a copy-on-write clone.

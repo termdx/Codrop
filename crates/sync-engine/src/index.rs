@@ -6,11 +6,13 @@
 use crate::vclock::VClock;
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// One row of the local file index.
-#[derive(Debug, Clone)]
+/// One row of the local file index. Also the wire shape exchanged with peers (Phase 2).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileRecord {
     /// Path relative to the synced root, forward-slashed (stable across OSes).
     pub path: String,
@@ -20,8 +22,11 @@ pub struct FileRecord {
     pub updated_ms: i64,
 }
 
+/// The connection is wrapped in a `Mutex` so `Index` (and therefore `Engine`) is `Sync`,
+/// which the async QUIC server needs to share it across tasks. Locks are never held across
+/// an `.await`, so this can't deadlock the runtime.
 pub struct Index {
-    conn: Connection,
+    conn: Mutex<Connection>,
 }
 
 impl Index {
@@ -40,7 +45,9 @@ impl Index {
                  value TEXT NOT NULL
              );",
         )?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     /// Stable identifier for this device, generated and persisted on first use.
@@ -54,8 +61,8 @@ impl Index {
     }
 
     pub fn get(&self, path: &str) -> Result<Option<FileRecord>> {
-        let row = self
-            .conn
+        let conn = self.conn.lock().unwrap();
+        let row = conn
             .query_row(
                 "SELECT path,hash,size,vclock,updated_ms FROM files WHERE path=?1",
                 [path],
@@ -67,7 +74,8 @@ impl Index {
 
     pub fn upsert(&self, rec: &FileRecord) -> Result<()> {
         let vclock = serde_json::to_string(&rec.vclock)?;
-        self.conn.execute(
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
             "INSERT INTO files(path,hash,size,vclock,updated_ms) VALUES(?1,?2,?3,?4,?5)
              ON CONFLICT(path) DO UPDATE SET
                  hash=excluded.hash, size=excluded.size,
@@ -84,9 +92,9 @@ impl Index {
     }
 
     pub fn all(&self) -> Result<Vec<FileRecord>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT path,hash,size,vclock,updated_ms FROM files ORDER BY path")?;
+        let conn = self.conn.lock().unwrap();
+        let mut stmt =
+            conn.prepare("SELECT path,hash,size,vclock,updated_ms FROM files ORDER BY path")?;
         let rows = stmt.query_map([], row_to_tuple)?;
         let mut out = Vec::new();
         for row in rows {
@@ -96,14 +104,15 @@ impl Index {
     }
 
     fn meta_get(&self, key: &str) -> Result<Option<String>> {
-        Ok(self
-            .conn
+        let conn = self.conn.lock().unwrap();
+        Ok(conn
             .query_row("SELECT value FROM meta WHERE key=?1", [key], |r| r.get(0))
             .optional()?)
     }
 
     fn meta_set(&self, key: &str, value: &str) -> Result<()> {
-        self.conn.execute(
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
             "INSERT INTO meta(key,value) VALUES(?1,?2)
              ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (key, value),
