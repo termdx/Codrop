@@ -1,92 +1,88 @@
 # Codrop
 
-A "Dropbox for devs": a unified code folder that auto-syncs across all of a developer's
-machines and cloud agents with zero manual effort. See the architecture plan for the full
-vision, the blueprint review, and the build phases.
+A "Dropbox for devs" — a unified code folder that automatically syncs across all your machines
+and cloud agents, with zero manual effort. No `git pull`, no copying `.env` files around, no
+building on a stale base.
 
-## Monorepo layout
+Codrop watches a folder, content-addresses every change, and syncs it to your other devices
+over an encrypted peer-to-peer connection. Devices are identified and authenticated by public
+key — you never deal with IP addresses, and it works across LAN, NAT, and restrictive Wi-Fi
+(direct when possible, relayed when the network won't allow direct).
 
-This is a Cargo workspace. Rust components live under `crates/`; non-Rust components (e.g. the
-macOS File Provider extension in Swift) will live in sibling top-level directories.
+## Build
 
-```
-codrop/
-├── Cargo.toml                  # workspace root: shared deps + metadata
-└── crates/
-    ├── watcher-daemon/         # codrop-watchd — standalone FS watcher (Phase 0 stepping stone)
-    ├── sync-engine/            # codrop-sync-engine — CAS + SQLite index + vector clocks
-    ├── transport/              # codrop-transport / codrop-net — iroh p2p index/blob/push sync
-    └── daemon/                 # codrop — live-sync daemon: watch + push/pull, persisted identity
-```
-
-### Build phases
-
-| Component | Where | Status |
-|---|---|---|
-| `watcher-daemon` | `crates/watcher-daemon` | ✅ Phase 0 — debounced FS watcher, ignore rules, manifest dry-run |
-| `sync-engine` | `crates/sync-engine` | ✅ Phase 1 — content-addressed store, SQLite index, vector clocks, `clonefile()` |
-| `transport` | `crates/transport` | ✅ Phase 2 — **iroh** p2p transport (hole-punch + relay fallback), index/blob/push sync |
-| `daemon` | `crates/daemon` | ✅ Live sync — watch + push/pull over iroh, persisted device identity, bidirectional |
-| `delta` | `crates/delta` | ⬜ Phase 3 — `fast_rsync` / FastCDC for large in-place files |
-| conflict engine | `crates/sync-engine` | ⬜ Phase 4 — conflicted-copies from concurrent vector clocks |
-| File Provider ext | `apple/` (Swift) | ⬜ Phase 5 — macOS lazy VFS over XPC to the Rust core |
-
-## How sync works (Phases 1–2)
-
-1. The **watcher** detects a change and calls `Engine::observe(path)`, which content-addresses
-   the bytes into `.codrop/blobs/`, and — if the hash changed — bumps this device's **vector
-   clock** and upserts the row in `.codrop/index.sqlite`.
-2. A peer **pulls** over an **iroh** connection (QUIC, with hole-punching + relay fallback so
-   it works across LAN/NAT/restrictive Wi-Fi): it fetches the server's index, and for each
-   record asks the engine to `evaluate` it via vector-clock comparison → `Skip` / `Fetch` /
-   `Conflict`. Peers are addressed by `EndpointId` (a public key), which also authenticates
-   them — no IP:port, no skip-verify TLS.
-3. `Fetch` requests the blob, then `apply_remote` materializes the file and records the
-   **merged** clock. Because the index now holds that content's hash, the watcher's later
-   `observe()` of the written file is a no-op — that idempotency is what kills sync echo loops.
-   `Conflict` (concurrent edits) is logged and deferred to Phase 4.
-
-## Build, test, run
+Requires **Rust ≥ 1.91**.
 
 ```bash
-cargo build
-cargo test  -p codrop-sync-engine     # CAS / index / vector-clock tests
-cargo test  -p codrop-transport       # two engines converge over iroh (loopback)
-cargo run   -p codrop-watchd -- /path/to/watch
+git clone https://github.com/termdx/Codrop.git
+cd Codrop
+cargo build --release
 ```
 
-### Two-node demo (`codrop-net`)
+Binaries land in `target/release/`: `codrop` (the daemon), plus `codrop-net` and
+`codrop-watchd`. Add that directory to your `PATH`, install with
+`cargo install --path crates/daemon`, or prefix the commands below with `./target/release/`.
 
-Peers connect by **EndpointId**, so this works across LAN, NAT, and relay — no IP needed.
+## Usage — the `codrop` daemon
+
+Run the daemon on each machine and point one at the other. A **single `--peer` gives
+bidirectional sync**.
 
 ```bash
-# device 1 — scan a tree and serve it; copy the printed endpoint id
-cargo run -p codrop-transport --bin codrop-net -- serve ~/projectA
-#   serving ~/projectA (N files)
-#     endpoint id: c166f63006cc...
+# machine B — print its stable id (or just run it and read the banner)
+codrop id ~/code
+#   d951e2ed584d...
 
-# device 2 — pull it into a fresh folder using that id
-cargo run -p codrop-transport --bin codrop-net -- pull ~/projectB c166f63006cc...
+# machine B — start syncing ~/code
+codrop run ~/code
+
+# machine A — sync ~/code with machine B
+codrop run ~/code --peer d951e2ed584d...
 ```
 
-### Live sync daemon (`codrop`)
+Now edits in `~/code` on either machine appear on the other within about a second. On connect,
+the two sides converge automatically (each receives the other's files); the link reconnects on
+its own if the network drops.
 
-Runs continuously: watches the folder and syncs changes to a peer automatically. Identity is
-persisted in `<dir>/.codrop/endpoint.key`, so the endpoint id is stable across restarts.
+- **Stable identity.** A device key lives in `<dir>/.codrop/endpoint.key`, so a device's id is
+  the same across restarts. `codrop id <dir>` prints it without starting the daemon.
+- **Ignored by default:** `node_modules`, `.git`, `target`, `dist`, `build`, `.next` — the
+  OS/toolchain-specific directories you don't want to sync.
+
+## One-shot sync — `codrop-net`
+
+For a single manual pull instead of a running daemon:
 
 ```bash
-# device 2 — learn its stable id (no daemon needed), then run it
-cargo run -p codrop-daemon --bin codrop -- id  ~/projectB     # prints the endpoint id
-cargo run -p codrop-daemon --bin codrop -- run ~/projectB
-
-# device 1 — point it at device 2's id; that single --peer is enough
-cargo run -p codrop-daemon --bin codrop -- run ~/projectA --peer <device-2-id>
+codrop-net serve ~/projectA           # prints an endpoint id
+codrop-net pull  ~/projectB <id>      # pull projectA's files into projectB, once
 ```
 
-Edits in **either** folder now propagate to the other within a second — **one `--peer` gives
-bidirectional sync**, because connections are symmetric (each link both serves the peer and
-carries our pushes). The `--peer` link auto-(re)connects in the background; on connect both
-sides converge (pull theirs + push ours).
+## How it works
 
-> Note: `.env` files currently sync in the clear. End-to-end encryption + selective-sync
-> policy for secrets is Phase 7 — don't point this at real secrets yet.
+- Every change is **content-addressed** (BLAKE3) into a local blob store and recorded in a
+  SQLite index keyed `path → hash → vector clock` (under `.codrop/`).
+- Devices sync over **iroh** (QUIC). Peers are addressed by `EndpointId` (an Ed25519 public
+  key) that also authenticates them; connectivity escalates direct → hole-punched → relayed.
+- **Vector clocks** (not wall-clock time) order changes, so a newer edit is distinguishable
+  from a concurrent one. Applying a change is idempotent (same content → no-op), which is what
+  prevents sync echo loops.
+- On macOS, files are materialized with copy-on-write (`clonefile`); other platforms copy.
+
+## Current limitations
+
+- Concurrent edits to the same file aren't yet turned into conflicted-copies, and file deletes
+  aren't yet propagated.
+- `.env` and other secrets sync in **cleartext** — don't point Codrop at real secrets yet.
+
+## Layout
+
+Cargo workspace:
+
+```
+crates/
+├── sync-engine/      content-addressed store + SQLite index + vector clocks
+├── transport/        iroh p2p transport + sync protocol  (codrop-net)
+├── daemon/           the codrop live-sync daemon
+└── watcher-daemon/   standalone filesystem watcher
+```
