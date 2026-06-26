@@ -24,7 +24,7 @@ codrop/
 |---|---|---|
 | `watcher-daemon` | `crates/watcher-daemon` | ✅ Phase 0 — debounced FS watcher, ignore rules, manifest dry-run |
 | `sync-engine` | `crates/sync-engine` | ✅ Phase 1 — content-addressed store, SQLite index, vector clocks, `clonefile()` |
-| `transport` | `crates/transport` | ✅ Phase 2 — QUIC peer transport, index/blob sync, mDNS discovery |
+| `transport` | `crates/transport` | ✅ Phase 2 — **iroh** p2p transport (hole-punch + relay fallback), index/blob sync |
 | `delta` | `crates/delta` | ⬜ Phase 3 — `fast_rsync` / FastCDC for large in-place files |
 | conflict engine | `crates/sync-engine` | ⬜ Phase 4 — conflicted-copies from concurrent vector clocks |
 | File Provider ext | `apple/` (Swift) | ⬜ Phase 5 — macOS lazy VFS over XPC to the Rust core |
@@ -34,9 +34,11 @@ codrop/
 1. The **watcher** detects a change and calls `Engine::observe(path)`, which content-addresses
    the bytes into `.codrop/blobs/`, and — if the hash changed — bumps this device's **vector
    clock** and upserts the row in `.codrop/index.sqlite`.
-2. A peer **pulls** over QUIC: it fetches the server's index, and for each record asks the
-   engine to `evaluate` it against local state via vector-clock comparison →
-   `Skip` / `Fetch` / `Conflict`.
+2. A peer **pulls** over an **iroh** connection (QUIC, with hole-punching + relay fallback so
+   it works across LAN/NAT/restrictive Wi-Fi): it fetches the server's index, and for each
+   record asks the engine to `evaluate` it via vector-clock comparison → `Skip` / `Fetch` /
+   `Conflict`. Peers are addressed by `EndpointId` (a public key), which also authenticates
+   them — no IP:port, no skip-verify TLS.
 3. `Fetch` requests the blob, then `apply_remote` materializes the file and records the
    **merged** clock. Because the index now holds that content's hash, the watcher's later
    `observe()` of the written file is a no-op — that idempotency is what kills sync echo loops.
@@ -47,21 +49,22 @@ codrop/
 ```bash
 cargo build
 cargo test  -p codrop-sync-engine     # CAS / index / vector-clock tests
-cargo test  -p codrop-transport       # two engines converge over QUIC (loopback)
+cargo test  -p codrop-transport       # two engines converge over iroh (loopback)
 cargo run   -p codrop-watchd -- /path/to/watch
 ```
 
 ### Two-node demo (`codrop-net`)
 
+Peers connect by **EndpointId**, so this works across LAN, NAT, and relay — no IP needed.
+
 ```bash
-# terminal 1 — scan a tree and serve it
-cargo run -p codrop-transport --bin codrop-net -- serve ~/projectA 127.0.0.1:4500
+# device 1 — scan a tree and serve it; copy the printed endpoint id
+cargo run -p codrop-transport --bin codrop-net -- serve ~/projectA
+#   serving ~/projectA (N files)
+#     endpoint id: c166f63006cc...
 
-# terminal 2 — pull it into a fresh folder
-cargo run -p codrop-transport --bin codrop-net -- pull ~/projectB 127.0.0.1:4500
-
-# browse the LAN for peers advertising _codrop._tcp
-cargo run -p codrop-transport --bin codrop-net -- discover
+# device 2 — pull it into a fresh folder using that id
+cargo run -p codrop-transport --bin codrop-net -- pull ~/projectB c166f63006cc...
 ```
 
 > Note: `.env` files currently sync in the clear. End-to-end encryption + selective-sync
