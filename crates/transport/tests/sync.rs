@@ -1,24 +1,32 @@
-//! Two engines converge over a real QUIC connection on loopback.
+//! Two engines converge over a real iroh connection on loopback (offline: Empty preset,
+//! connecting by direct address — no relay/discovery/internet needed).
 
 use codrop_sync_engine::Engine;
-use codrop_transport::{pull, serve};
+use codrop_transport::{pull_on, serve_on, ALPN};
+use iroh::endpoint::presets;
+use iroh::{Endpoint, EndpointAddr, TransportAddr};
 use std::fs;
-use std::net::SocketAddr;
 use std::sync::Arc;
 
-fn engine_with_root(tmp: &std::path::Path, name: &str) -> (Engine, std::path::PathBuf) {
-    let root = tmp.join(name);
-    fs::create_dir_all(&root).unwrap();
-    let engine = Engine::open(&root, root.join(".codrop")).unwrap();
-    (engine, root)
+async fn loopback_endpoint() -> Endpoint {
+    Endpoint::builder(presets::Empty)
+        .crypto_provider(codrop_transport::crypto_provider())
+        .alpns(vec![ALPN.to_vec()])
+        .bind_addr("127.0.0.1:0")
+        .unwrap()
+        .bind()
+        .await
+        .unwrap()
 }
 
 #[tokio::test]
-async fn peer_pull_converges_and_is_idempotent() {
+async fn peer_pull_converges_over_iroh() {
     let tmp = tempfile::tempdir().unwrap();
 
     // --- Source node A: a tree with two files, indexed. ---
-    let (a, a_root) = engine_with_root(tmp.path(), "A");
+    let a_root = tmp.path().join("A");
+    fs::create_dir_all(&a_root).unwrap();
+    let a = Engine::open(&a_root, a_root.join(".codrop")).unwrap();
     fs::write(a_root.join("main.rs"), b"fn main() {}").unwrap();
     fs::create_dir_all(a_root.join("nested")).unwrap();
     fs::write(a_root.join("nested/util.rs"), b"pub fn util() {}").unwrap();
@@ -26,34 +34,38 @@ async fn peer_pull_converges_and_is_idempotent() {
     a.observe(&a_root.join("nested/util.rs")).unwrap();
     let a_device = a.device_id().to_string();
 
-    // Serve A over QUIC on an ephemeral loopback port.
-    let endpoint = serve(Arc::new(a), "127.0.0.1:0".parse().unwrap())
-        .await
-        .unwrap();
-    let addr: SocketAddr = endpoint.local_addr().unwrap();
+    // Serve A on an iroh endpoint, and build its direct loopback address for the client.
+    let server_ep = loopback_endpoint().await;
+    let server_addr = EndpointAddr::from_parts(
+        server_ep.id(),
+        server_ep.bound_sockets().into_iter().map(TransportAddr::Ip),
+    );
+    serve_on(Arc::new(a), &server_ep);
 
     // --- Empty node B pulls from A. ---
-    let (b, b_root) = engine_with_root(tmp.path(), "B");
-    let stats = pull(&b, addr).await.unwrap();
+    let b_root = tmp.path().join("B");
+    fs::create_dir_all(&b_root).unwrap();
+    let b = Engine::open(&b_root, b_root.join(".codrop")).unwrap();
+    let client_ep = loopback_endpoint().await;
 
-    // B fetched both files; nothing skipped or conflicting.
+    let stats = pull_on(&b, &client_ep, server_addr.clone()).await.unwrap();
+
     assert_eq!(stats.total, 2);
     assert_eq!(stats.fetched, 2);
     assert_eq!(stats.conflicts, 0);
 
-    // Files are materialized into B's tree with identical content.
     assert_eq!(fs::read(b_root.join("main.rs")).unwrap(), b"fn main() {}");
     assert_eq!(
         fs::read(b_root.join("nested/util.rs")).unwrap(),
         b"pub fn util() {}"
     );
 
-    // B's index carries A's vector clock (causal history preserved across the wire).
+    // Causal history preserved across the wire.
     let rec = b.index().get("main.rs").unwrap().unwrap();
     assert_eq!(rec.vclock.get(&a_device), 1);
 
-    // Pulling again is a no-op: everything is now identical (echo-loop safety).
-    let again = pull(&b, addr).await.unwrap();
+    // Pulling again is a no-op (echo-loop safety).
+    let again = pull_on(&b, &client_ep, server_addr).await.unwrap();
     assert_eq!(again.fetched, 0);
     assert_eq!(again.skipped, 2);
 }

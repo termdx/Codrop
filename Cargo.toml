@@ -29,6 +29,8 @@ rustls = "0.23"
 rcgen = "0.13"
 tokio = { version = "1", features = ["full"] }
 mdns-sd = "0.11"
+# iroh — p2p QUIC with hole-punching + relay fallback (replaces raw quinn transport)
+iroh = "1"
 # Internal crates
 codrop-sync-engine = { path = "crates/sync-engine" }
 codrop-transport = { path = "crates/transport" }

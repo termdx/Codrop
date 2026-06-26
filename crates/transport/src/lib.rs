@@ -1,15 +1,14 @@
-//! Codrop transport (Phase 2).
+//! Codrop transport (Phase 2, on iroh).
 //!
-//! Peer-to-peer sync over QUIC (`quinn`) with mDNS discovery (`mdns-sd`). A node serves its
-//! local index and blobs; a peer pulls, comparing vector clocks to decide what to fetch and
-//! applying it through the engine. Content-addressing makes apply idempotent, so re-syncs and
-//! watcher echoes don't loop.
+//! Peer-to-peer sync over **iroh** — QUIC with hole-punching and relay fallback, peers
+//! addressed by public-key `EndpointId`. A node serves its index/blobs; a peer pulls,
+//! comparing vector clocks to decide what to fetch and applying it through the engine.
+//! Content-addressing makes apply idempotent, so re-syncs and watcher echoes don't loop.
 //!
-//! P2P-LAN-first (per the plan): peers find each other on the LAN and connect directly.
+//! iroh gives us the tiered connectivity (direct → hole-punch → relay) that raw direct-QUIC
+//! lacked — including past the Wi-Fi client-isolation that broke our earlier LAN test.
 
-pub mod discovery;
 pub mod node;
 pub mod proto;
-mod tls;
 
-pub use node::{pull, serve, SyncStats};
+pub use node::{crypto_provider, pull, pull_on, serve, serve_on, SyncStats, ALPN};

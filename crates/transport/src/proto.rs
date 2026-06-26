@@ -24,7 +24,7 @@ pub enum Resp {
 }
 
 /// Write a `u32` big-endian length prefix followed by the JSON body.
-pub async fn write_msg<T: Serialize>(send: &mut quinn::SendStream, msg: &T) -> anyhow::Result<()> {
+pub async fn write_msg<T: Serialize>(send: &mut iroh::endpoint::SendStream, msg: &T) -> anyhow::Result<()> {
     let body = serde_json::to_vec(msg)?;
     send.write_all(&(body.len() as u32).to_be_bytes()).await?;
     send.write_all(&body).await?;
@@ -32,7 +32,7 @@ pub async fn write_msg<T: Serialize>(send: &mut quinn::SendStream, msg: &T) -> a
 }
 
 /// Read one length-prefixed JSON message.
-pub async fn read_msg<T: DeserializeOwned>(recv: &mut quinn::RecvStream) -> anyhow::Result<T> {
+pub async fn read_msg<T: DeserializeOwned>(recv: &mut iroh::endpoint::RecvStream) -> anyhow::Result<T> {
     let mut len = [0u8; 4];
     recv.read_exact(&mut len).await?;
     let n = u32::from_be_bytes(len) as usize;
