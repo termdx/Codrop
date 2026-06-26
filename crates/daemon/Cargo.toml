@@ -1,0 +1,20 @@
+[package]
+name = "codrop-daemon"
+description = "Codrop live-sync daemon: watch a folder and sync changes to peers over iroh."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "codrop"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+tokio.workspace = true
+iroh.workspace = true
+notify.workspace = true
+notify-debouncer-full.workspace = true
+codrop-sync-engine.workspace = true
+codrop-transport.workspace = true
