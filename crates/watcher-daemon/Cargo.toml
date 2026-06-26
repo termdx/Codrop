@@ -1,0 +1,18 @@
+[package]
+name = "codrop-watchd"
+description = "Codrop stepping stone: a debounced cross-platform file-watcher daemon."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "codrop-watchd"
+path = "src/main.rs"
+
+[dependencies]
+notify.workspace = true
+notify-debouncer-full.workspace = true
+blake3.workspace = true
+anyhow.workspace = true
+codrop-sync-engine.workspace = true

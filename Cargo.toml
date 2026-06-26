@@ -1,0 +1,27 @@
+# Codrop monorepo — Cargo workspace.
+# Rust components live under crates/. Non-Rust components (e.g. the macOS File
+# Provider extension, Swift) will live in sibling top-level dirs (e.g. apple/).
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+# Shared metadata inherited by member crates via `field.workspace = true`.
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/emp0/codrop"
+
+# Shared dependency versions, pinned once here and inherited by members.
+[workspace.dependencies]
+notify = "6"
+notify-debouncer-full = "0.3"
+blake3 = "1"
+anyhow = "1"
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
+tempfile = "3"
+# Internal crates
+codrop-sync-engine = { path = "crates/sync-engine" }
