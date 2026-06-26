@@ -11,4 +11,7 @@
 pub mod node;
 pub mod proto;
 
-pub use node::{crypto_provider, pull, pull_on, serve, serve_on, SyncStats, ALPN};
+pub use node::{
+    connect, crypto_provider, endpoint_with_key, load_or_create_key, pull, pull_on, pull_over,
+    push, serve, serve_on, SyncStats, ALPN,
+};

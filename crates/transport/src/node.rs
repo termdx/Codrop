@@ -3,15 +3,17 @@
 //! Peers are addressed by their `EndpointId` (an Ed25519 public key), not `IP:port`. iroh's
 //! discovery + relay resolve that id to a working path: direct on the LAN, hole-punched across
 //! NATs, or relayed when neither works (e.g. the Wi-Fi AP-isolation case that blocked our raw
-//! QUIC transport). The endpoint key doubles as device identity — no more skip-verify TLS.
+//! QUIC transport). The endpoint key doubles as device identity — no skip-verify TLS.
 //!
-//! The sync protocol (`proto.rs`) and the engine are unchanged; only the transport swapped.
+//! One connection carries both **pulls** (Index/Blob, for catch-up) and **pushes** (live
+//! changes). The sync protocol and the engine are unchanged; only the transport swapped.
 
 use crate::proto::{read_msg, write_msg, Req, Resp};
 use anyhow::{bail, Result};
-use codrop_sync_engine::{Engine, SyncAction};
+use codrop_sync_engine::{Engine, FileRecord, SyncAction};
 use iroh::endpoint::{presets, Connection};
-use iroh::{Endpoint, EndpointAddr};
+use iroh::{Endpoint, EndpointAddr, SecretKey};
+use std::path::Path;
 use std::sync::Arc;
 
 /// ALPN identifying the Codrop sync protocol on an iroh connection.
@@ -33,7 +35,33 @@ pub struct SyncStats {
     pub conflicts: usize,
 }
 
-/// Build a Codrop endpoint with the given iroh preset (N0 = discovery + relay).
+/// Load a persisted device key from `path`, or generate one and save it. A stable key means a
+/// stable `EndpointId` (device identity) across restarts.
+pub fn load_or_create_key(path: &Path) -> Result<SecretKey> {
+    if let Ok(bytes) = std::fs::read(path) {
+        if let Ok(arr) = <[u8; 32]>::try_from(bytes.as_slice()) {
+            return Ok(SecretKey::from_bytes(&arr));
+        }
+    }
+    let key = SecretKey::generate();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, key.to_bytes())?;
+    Ok(key)
+}
+
+/// Build a Codrop endpoint with full connectivity (N0: discovery + relay) and the given key.
+pub async fn endpoint_with_key(secret_key: SecretKey) -> Result<Endpoint> {
+    Ok(Endpoint::builder(presets::N0)
+        .secret_key(secret_key)
+        .crypto_provider(crypto_provider())
+        .alpns(vec![ALPN.to_vec()])
+        .bind()
+        .await?)
+}
+
+/// Build a Codrop endpoint with an ephemeral key (full connectivity).
 async fn build_endpoint(preset: impl presets::Preset) -> Result<Endpoint> {
     Ok(Endpoint::builder(preset)
         .crypto_provider(crypto_provider())
@@ -50,7 +78,8 @@ pub async fn serve(engine: Arc<Engine>) -> Result<Endpoint> {
     Ok(endpoint)
 }
 
-/// Spawn the accept loop for `engine` on an existing endpoint (used by `serve` and tests).
+/// Spawn the accept loop for `engine` on an existing endpoint (used by `serve`, the daemon,
+/// and tests). Handles both pulls and live pushes from connecting peers.
 pub fn serve_on(engine: Arc<Engine>, endpoint: &Endpoint) {
     let endpoint = endpoint.clone();
     tokio::spawn(async move {
@@ -58,6 +87,8 @@ pub fn serve_on(engine: Arc<Engine>, endpoint: &Endpoint) {
             let engine = engine.clone();
             tokio::spawn(async move {
                 if let Ok(conn) = incoming.await {
+                    let peer = conn.remote_id();
+                    eprintln!("peer connected: {}", peer.fmt_short());
                     let _ = handle_conn(engine, conn).await;
                 }
             });
@@ -80,6 +111,14 @@ async fn handle_conn(engine: Arc<Engine>, conn: Connection) -> Result<()> {
                 Some(bytes) => Resp::Blob { bytes },
                 None => Resp::NotFound,
             },
+            Req::Push { record, bytes } => {
+                // Apply only if the pushed version causally supersedes ours.
+                if matches!(engine.evaluate(&record)?, SyncAction::Fetch) {
+                    engine.apply_remote(&record, &bytes)?;
+                    eprintln!("applied push: {}", record.path);
+                }
+                Resp::Ok
+            }
         };
         write_msg(&mut send, &resp).await?;
         send.finish()?;
@@ -87,7 +126,24 @@ async fn handle_conn(engine: Arc<Engine>, conn: Connection) -> Result<()> {
     Ok(())
 }
 
-/// Connect to `peer` (an `EndpointId` or full `EndpointAddr`) on a fresh endpoint and pull.
+/// Open a connection to `peer` on an existing endpoint (reused for pulls and pushes).
+pub async fn connect(endpoint: &Endpoint, peer: impl Into<EndpointAddr>) -> Result<Connection> {
+    Ok(endpoint.connect(peer, ALPN).await?)
+}
+
+/// Push one changed file to a peer over an existing connection (live sync).
+pub async fn push(conn: &Connection, record: &FileRecord, bytes: &[u8]) -> Result<()> {
+    let req = Req::Push {
+        record: record.clone(),
+        bytes: bytes.to_vec(),
+    };
+    match request(conn, &req).await? {
+        Resp::Ok => Ok(()),
+        _ => bail!("unexpected response to Push"),
+    }
+}
+
+/// Connect to `peer` on a fresh endpoint and pull (one-shot CLI path).
 pub async fn pull(engine: &Engine, peer: impl Into<EndpointAddr>) -> Result<SyncStats> {
     let endpoint = build_endpoint(presets::N0).await?;
     let stats = pull_on(engine, &endpoint, peer).await?;
@@ -95,16 +151,21 @@ pub async fn pull(engine: &Engine, peer: impl Into<EndpointAddr>) -> Result<Sync
     Ok(stats)
 }
 
-/// Pull from `peer` using an existing endpoint (used by `pull` and tests). Closes only the
-/// connection, leaving the endpoint reusable.
+/// Pull from `peer` using an existing endpoint, on a fresh connection.
 pub async fn pull_on(
     engine: &Engine,
     endpoint: &Endpoint,
     peer: impl Into<EndpointAddr>,
 ) -> Result<SyncStats> {
-    let conn = endpoint.connect(peer, ALPN).await?;
+    let conn = connect(endpoint, peer).await?;
+    let stats = pull_over(engine, &conn).await?;
+    conn.close(0u32.into(), b"done");
+    Ok(stats)
+}
 
-    let records = match request(&conn, &Req::Index).await? {
+/// Pull over an already-open connection: fetch the peer's index and apply what supersedes us.
+pub async fn pull_over(engine: &Engine, conn: &Connection) -> Result<SyncStats> {
+    let records = match request(conn, &Req::Index).await? {
         Resp::Index { records } => records,
         _ => bail!("peer returned a non-index response to Index"),
     };
@@ -121,7 +182,7 @@ pub async fn pull_on(
                 stats.conflicts += 1;
                 eprintln!("conflict: {} (concurrent edit; deferred to Phase 4)", rec.path);
             }
-            SyncAction::Fetch => match request(&conn, &Req::Blob { hash: rec.hash.clone() }).await? {
+            SyncAction::Fetch => match request(conn, &Req::Blob { hash: rec.hash.clone() }).await? {
                 Resp::Blob { bytes } => {
                     engine.apply_remote(rec, &bytes)?;
                     stats.fetched += 1;
@@ -130,8 +191,6 @@ pub async fn pull_on(
             },
         }
     }
-
-    conn.close(0u32.into(), b"done");
     Ok(stats)
 }
 

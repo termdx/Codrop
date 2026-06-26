@@ -6,21 +6,25 @@
 use codrop_sync_engine::FileRecord;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
-/// Client -> server.
+/// One peer -> another. The same connection carries pulls (Index/Blob) and live pushes.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Req {
     /// "Send me your whole index."
     Index,
     /// "Send me the bytes for this content hash."
     Blob { hash: String },
+    /// "Here is a changed file — apply it if it supersedes yours." (live sync)
+    Push { record: FileRecord, bytes: Vec<u8> },
 }
 
-/// Server -> client.
+/// Response to a `Req`.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Resp {
     Index { records: Vec<FileRecord> },
     Blob { bytes: Vec<u8> },
     NotFound,
+    /// Acknowledges a `Push`.
+    Ok,
 }
 
 /// Write a `u32` big-endian length prefix followed by the JSON body.
