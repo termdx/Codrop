@@ -75,16 +75,18 @@ Runs continuously: watches the folder and syncs changes to a peer automatically.
 persisted in `<dir>/.codrop/endpoint.key`, so the endpoint id is stable across restarts.
 
 ```bash
-# device 2 — start the daemon; note its (stable) endpoint id
+# device 2 — learn its stable id (no daemon needed), then run it
+cargo run -p codrop-daemon --bin codrop -- id  ~/projectB     # prints the endpoint id
 cargo run -p codrop-daemon --bin codrop -- run ~/projectB
 
-# device 1 — start the daemon pointed at device 2's id
+# device 1 — point it at device 2's id; that single --peer is enough
 cargo run -p codrop-daemon --bin codrop -- run ~/projectA --peer <device-2-id>
 ```
 
-Now edits in `~/projectA` propagate to `~/projectB` within a second. For **bidirectional** live
-sync, pass `--peer` on both sides (each daemon pushes its own changes over its outgoing
-connection). Initial convergence on connect is automatic (pull theirs + push ours).
+Edits in **either** folder now propagate to the other within a second — **one `--peer` gives
+bidirectional sync**, because connections are symmetric (each link both serves the peer and
+carries our pushes). The `--peer` link auto-(re)connects in the background; on connect both
+sides converge (pull theirs + push ours).
 
 > Note: `.env` files currently sync in the clear. End-to-end encryption + selective-sync
 > policy for secrets is Phase 7 — don't point this at real secrets yet.
