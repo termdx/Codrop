@@ -1,22 +1,22 @@
 //! `codrop` — the live-sync daemon.
 //!
-//!   codrop run <dir> [--peer <endpoint-id>]
+//!   codrop run <dir> [--peer <endpoint-id>]   # watch + sync continuously
+//!   codrop id  <dir>                           # print the dir's stable endpoint id
 //!
-//! Fuses the three phases into one long-running process: it watches `<dir>` (Phase 0), keeps
-//! the content-addressed index (Phase 1), and pushes/pulls changes to a peer over iroh
-//! (Phase 2). Identity is a persisted key in `<dir>/.codrop/endpoint.key`, so the EndpointId
-//! is stable across restarts.
+//! Fuses the phases into one process: watches `<dir>` (Phase 0), keeps the content-addressed
+//! index (Phase 1), and syncs over iroh (Phase 2). Identity is a persisted key in
+//! `<dir>/.codrop/endpoint.key`, so the EndpointId is stable across restarts.
 //!
-//! On startup it connects to `--peer` (if given), pulls the peer's files, and pushes its own
-//! (initial convergence). Thereafter every local change is pushed live. Pushes received from a
-//! peer are applied by the engine; because the index then holds that content's hash, the
-//! watcher's `observe()` of the written file is a no-op — content-addressing suppresses echoes.
+//! Connections are **symmetric**: every link (whether we dialed it or accepted it) both serves
+//! the peer's requests and carries our pushes. So pointing one side at the other with a single
+//! `--peer` gives **bidirectional** live sync — no need to configure both ends. The `--peer`
+//! link auto-(re)connects in the background; on connect we pull the peer's files and push ours.
 //!
-//! Live sync is per outgoing connection: A learns B's edits only if A ran with `--peer B`.
-//! For bidirectional live sync, run the daemon with `--peer` on both sides.
+//! Echo loops are impossible: an applied push lands in the index, so the watcher's `observe()`
+//! of that write is a no-op (content-addressing).
 
 use anyhow::{anyhow, bail, Result};
-use codrop_sync_engine::Engine;
+use codrop_sync_engine::{Engine, FileRecord};
 use codrop_transport as net;
 use iroh::endpoint::Connection;
 use iroh::{Endpoint, EndpointId};
@@ -25,16 +25,34 @@ use notify_debouncer_full::new_debouncer;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex;
 
 const IGNORE: &[&str] = &[".codrop", "node_modules", ".git", "target", "dist", "build", ".next"];
+
+/// Live connections to peers (inbound + the outbound `--peer` link).
+type PeerSet = Arc<Mutex<Vec<Connection>>>;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    if args.get(1).map(String::as_str) != Some("run") {
-        bail!("usage: codrop run <dir> [--peer <endpoint-id>]");
+    match args.get(1).map(String::as_str) {
+        Some("run") => run(&args).await,
+        Some("id") => id_cmd(&args),
+        _ => bail!("usage: codrop run <dir> [--peer <id>]  |  codrop id <dir>"),
     }
+}
 
+/// Print the stable endpoint id for `<dir>` without starting the daemon (generates the key on
+/// first use). Use it to learn a folder's id for the other side's `--peer`.
+fn id_cmd(args: &[String]) -> Result<()> {
+    let dir = PathBuf::from(args.get(2).ok_or_else(|| anyhow!("usage: codrop id <dir>"))?);
+    std::fs::create_dir_all(&dir)?;
+    let key = net::load_or_create_key(&dir.join(".codrop/endpoint.key"))?;
+    println!("{}", key.public());
+    Ok(())
+}
+
+async fn run(args: &[String]) -> Result<()> {
     let dir = PathBuf::from(args.get(2).ok_or_else(|| anyhow!("usage: codrop run <dir> [--peer <id>]"))?);
     std::fs::create_dir_all(&dir)?;
     let root = dir.canonicalize()?;
@@ -52,7 +70,6 @@ async fn main() -> Result<()> {
     let engine = Arc::new(Engine::open(&root, root.join(".codrop"))?);
     let indexed = scan(&engine, &root)?;
 
-    // Stable device identity, persisted under .codrop.
     let key = net::load_or_create_key(&root.join(".codrop/endpoint.key"))?;
     let endpoint = net::endpoint_with_key(key).await?;
     println!("codrop: watching {} ({indexed} files)", root.display());
@@ -61,28 +78,14 @@ async fn main() -> Result<()> {
         println!("  peer: {p}");
     }
 
-    // Accept incoming connections (serve pulls + receive live pushes).
-    net::serve_on(engine.clone(), &endpoint);
+    let peers: PeerSet = Arc::new(Mutex::new(Vec::new()));
 
-    // Connect to the peer (if any): pull theirs, push ours — initial convergence.
-    let mut conn: Option<Connection> = None;
+    spawn_accept_loop(endpoint.clone(), engine.clone(), peers.clone());
     if let Some(peer) = peer {
-        match net::connect(&endpoint, peer).await {
-            Ok(c) => {
-                match net::pull_over(&engine, &c).await {
-                    Ok(stats) => println!("initial pull: {stats:?}"),
-                    Err(e) => eprintln!("initial pull failed: {e}"),
-                }
-                if let Err(e) = push_all(&engine, &c).await {
-                    eprintln!("initial push failed: {e}");
-                }
-                conn = Some(c);
-            }
-            Err(e) => eprintln!("peer not reachable yet (will retry on first change): {e}"),
-        }
+        spawn_peer_link(endpoint.clone(), engine.clone(), peers.clone(), peer);
     }
 
-    // File watcher on a dedicated thread; events bridged to the async loop.
+    // File watcher on a dedicated thread; events bridged to this async loop.
     let (raw_tx, raw_rx) = std::sync::mpsc::channel();
     let mut debouncer = new_debouncer(Duration::from_millis(400), None, raw_tx)?;
     debouncer.watcher().watch(&root, RecursiveMode::Recursive)?;
@@ -116,46 +119,85 @@ async fn main() -> Result<()> {
         }
         println!("changed: {} ({})", obs.path, &obs.hash[..12]);
 
-        if let Some(peer) = peer {
-            let Some(rec) = engine.index().get(&obs.path)? else { continue };
-            let Some(bytes) = engine.store().read(&obs.hash)? else { continue };
-            match push_with_retry(&endpoint, peer, &rec, &bytes, &mut conn).await {
-                Ok(()) => println!("  -> pushed to peer"),
-                Err(e) => eprintln!("  -> push failed: {e}"),
-            }
-        }
+        let Some(rec) = engine.index().get(&obs.path)? else { continue };
+        let Some(bytes) = engine.store().read(&obs.hash)? else { continue };
+        broadcast(&peers, &rec, &bytes).await;
     }
 
     Ok(())
 }
 
-/// Push every locally-indexed file to a peer (initial convergence). No-op on the peer for
-/// content it already has.
+/// Accept inbound connections: register each one and serve it (it also carries our pushes).
+fn spawn_accept_loop(endpoint: Endpoint, engine: Arc<Engine>, peers: PeerSet) {
+    tokio::spawn(async move {
+        while let Some(incoming) = endpoint.accept().await {
+            let engine = engine.clone();
+            let peers = peers.clone();
+            tokio::spawn(async move {
+                if let Ok(conn) = incoming.await {
+                    println!("peer connected: {}", conn.remote_id().fmt_short());
+                    peers.lock().await.push(conn.clone());
+                    let _ = net::serve_connection(engine, conn).await;
+                }
+            });
+        }
+    });
+}
+
+/// Keep the outbound `--peer` link alive: (re)connect, converge, register, and serve it.
+fn spawn_peer_link(endpoint: Endpoint, engine: Arc<Engine>, peers: PeerSet, peer: EndpointId) {
+    tokio::spawn(async move {
+        loop {
+            // Drop dead links, then connect if we don't already have a live one to `peer`.
+            let connected = {
+                let mut set = peers.lock().await;
+                set.retain(|c| c.close_reason().is_none());
+                set.iter().any(|c| c.remote_id() == peer)
+            };
+            if !connected {
+                if let Ok(conn) = net::connect(&endpoint, peer).await {
+                    println!("connected to peer {}", peer.fmt_short());
+                    match net::pull_over(&engine, &conn).await {
+                        Ok(stats) => println!("  initial pull: {stats:?}"),
+                        Err(e) => eprintln!("  initial pull failed: {e}"),
+                    }
+                    if let Err(e) = push_all(&engine, &conn).await {
+                        eprintln!("  initial push failed: {e}");
+                    }
+                    peers.lock().await.push(conn.clone());
+                    let engine = engine.clone();
+                    tokio::spawn(async move {
+                        let _ = net::serve_connection(engine, conn).await;
+                    });
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    });
+}
+
+/// Push a change to every live peer connection; prune any that have closed.
+async fn broadcast(peers: &PeerSet, rec: &FileRecord, bytes: &[u8]) {
+    let conns: Vec<Connection> = peers.lock().await.clone();
+    let mut pushed = 0;
+    for conn in &conns {
+        match net::push(conn, rec, bytes).await {
+            Ok(()) => pushed += 1,
+            Err(e) => eprintln!("  push to {} failed: {e}", conn.remote_id().fmt_short()),
+        }
+    }
+    peers.lock().await.retain(|c| c.close_reason().is_none());
+    if pushed > 0 {
+        println!("  -> pushed to {pushed} peer(s)");
+    }
+}
+
+/// Push every locally-indexed file to a peer (initial convergence). No-op for content the peer
+/// already has.
 async fn push_all(engine: &Engine, conn: &Connection) -> Result<()> {
     for rec in engine.local_records()? {
         if let Some(bytes) = engine.store().read(&rec.hash)? {
             net::push(conn, &rec, &bytes).await?;
-        }
-    }
-    Ok(())
-}
-
-/// Push one change, (re)connecting once if the cached connection has dropped.
-async fn push_with_retry(
-    endpoint: &Endpoint,
-    peer: EndpointId,
-    rec: &codrop_sync_engine::FileRecord,
-    bytes: &[u8],
-    conn: &mut Option<Connection>,
-) -> Result<()> {
-    for attempt in 0..2 {
-        if conn.is_none() {
-            *conn = Some(net::connect(endpoint, peer).await?);
-        }
-        match net::push(conn.as_ref().unwrap(), rec, bytes).await {
-            Ok(()) => return Ok(()),
-            Err(_) if attempt == 0 => *conn = None, // drop & reconnect once
-            Err(e) => return Err(e),
         }
     }
     Ok(())

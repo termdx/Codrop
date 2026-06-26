@@ -89,14 +89,16 @@ pub fn serve_on(engine: Arc<Engine>, endpoint: &Endpoint) {
                 if let Ok(conn) = incoming.await {
                     let peer = conn.remote_id();
                     eprintln!("peer connected: {}", peer.fmt_short());
-                    let _ = handle_conn(engine, conn).await;
+                    let _ = serve_connection(engine, conn).await;
                 }
             });
         }
     });
 }
 
-async fn handle_conn(engine: Arc<Engine>, conn: Connection) -> Result<()> {
+/// Serve requests (Index/Blob/Push) on an established connection until the peer closes it.
+/// Public so callers (the daemon) can run their own accept loop and register connections.
+pub async fn serve_connection(engine: Arc<Engine>, conn: Connection) -> Result<()> {
     // One bidirectional stream per request; loop until the peer closes the connection.
     loop {
         let (mut send, mut recv) = match conn.accept_bi().await {
