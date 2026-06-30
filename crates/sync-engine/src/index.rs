@@ -11,7 +11,7 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// One row of the local file index. Also the wire shape exchanged with peers (Phase 2).
+/// One row of the local file index. Also the wire shape exchanged with peers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileRecord {
     /// Path relative to the synced root, forward-slashed (stable across OSes).
@@ -20,6 +20,10 @@ pub struct FileRecord {
     pub size: u64,
     pub vclock: VClock,
     pub updated_ms: i64,
+    /// Tombstone: the file was deleted. The row (with its vclock) is kept so the deletion
+    /// propagates to peers and can be ordered against concurrent edits.
+    #[serde(default)]
+    pub deleted: bool,
 }
 
 /// The connection is wrapped in a `Mutex` so `Index` (and therefore `Engine`) is `Sync`,
@@ -45,6 +49,12 @@ impl Index {
                  value TEXT NOT NULL
              );",
         )?;
+        // Migration: add the tombstone column to indexes created before deletes existed.
+        // Errors (e.g. "duplicate column") are expected on already-migrated DBs — ignore them.
+        let _ = conn.execute(
+            "ALTER TABLE files ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -64,7 +74,7 @@ impl Index {
         let conn = self.conn.lock().unwrap();
         let row = conn
             .query_row(
-                "SELECT path,hash,size,vclock,updated_ms FROM files WHERE path=?1",
+                "SELECT path,hash,size,vclock,updated_ms,deleted FROM files WHERE path=?1",
                 [path],
                 row_to_tuple,
             )
@@ -76,16 +86,18 @@ impl Index {
         let vclock = serde_json::to_string(&rec.vclock)?;
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO files(path,hash,size,vclock,updated_ms) VALUES(?1,?2,?3,?4,?5)
+            "INSERT INTO files(path,hash,size,vclock,updated_ms,deleted) VALUES(?1,?2,?3,?4,?5,?6)
              ON CONFLICT(path) DO UPDATE SET
                  hash=excluded.hash, size=excluded.size,
-                 vclock=excluded.vclock, updated_ms=excluded.updated_ms",
+                 vclock=excluded.vclock, updated_ms=excluded.updated_ms,
+                 deleted=excluded.deleted",
             (
                 &rec.path,
                 &rec.hash,
                 rec.size as i64,
                 vclock,
                 rec.updated_ms,
+                rec.deleted as i64,
             ),
         )?;
         Ok(())
@@ -93,8 +105,8 @@ impl Index {
 
     pub fn all(&self) -> Result<Vec<FileRecord>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt =
-            conn.prepare("SELECT path,hash,size,vclock,updated_ms FROM files ORDER BY path")?;
+        let mut stmt = conn
+            .prepare("SELECT path,hash,size,vclock,updated_ms,deleted FROM files ORDER BY path")?;
         let rows = stmt.query_map([], row_to_tuple)?;
         let mut out = Vec::new();
         for row in rows {
@@ -121,19 +133,27 @@ impl Index {
     }
 }
 
-type Row = (String, String, i64, String, i64);
+type Row = (String, String, i64, String, i64, i64);
 
 fn row_to_tuple(r: &rusqlite::Row) -> rusqlite::Result<Row> {
-    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+    Ok((
+        r.get(0)?,
+        r.get(1)?,
+        r.get(2)?,
+        r.get(3)?,
+        r.get(4)?,
+        r.get(5)?,
+    ))
 }
 
-fn tuple_to_record((path, hash, size, vclock, updated_ms): Row) -> Result<FileRecord> {
+fn tuple_to_record((path, hash, size, vclock, updated_ms, deleted): Row) -> Result<FileRecord> {
     Ok(FileRecord {
         path,
         hash,
         size: size as u64,
         vclock: serde_json::from_str(&vclock)?,
         updated_ms,
+        deleted: deleted != 0,
     })
 }
 

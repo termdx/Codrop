@@ -1,5 +1,22 @@
-use codrop_sync_engine::{Causality, Engine, VClock};
+use codrop_sync_engine::{ApplyOutcome, Causality, Engine, FileRecord, VClock};
 use std::fs;
+use std::path::PathBuf;
+
+/// Two independent engines under one temp dir, for sync/conflict tests.
+fn engine_at(tmp: &tempfile::TempDir, name: &str) -> (Engine, PathBuf) {
+    let root = tmp.path().join(name);
+    fs::create_dir_all(&root).unwrap();
+    let engine = Engine::open(&root, root.join(".codrop")).unwrap();
+    (engine, root)
+}
+
+/// Index a freshly-written file and return its record + content for handing to a peer.
+fn record_of(engine: &Engine, root: &std::path::Path, rel: &str) -> (FileRecord, Vec<u8>) {
+    let obs = engine.observe(&root.join(rel)).unwrap();
+    let rec = engine.index().get(&obs.path).unwrap().unwrap();
+    let bytes = engine.store().read(&obs.hash).unwrap().unwrap();
+    (rec, bytes)
+}
 
 #[test]
 fn observe_stores_indexes_and_bumps_clock() {
@@ -56,6 +73,72 @@ fn materialize_roundtrips() {
     let dest = tmp.path().join("restored/data.bin");
     engine.store().materialize(&obs.hash, &dest).unwrap();
     assert_eq!(fs::read(&dest).unwrap(), b"some bytes here");
+}
+
+#[test]
+fn delete_propagates_as_tombstone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (a, a_root) = engine_at(&tmp, "A");
+    let (b, b_root) = engine_at(&tmp, "B");
+
+    // A creates foo.txt; B receives it.
+    fs::write(a_root.join("foo.txt"), b"hi").unwrap();
+    let (rec, bytes) = record_of(&a, &a_root, "foo.txt");
+    assert_eq!(b.apply_incoming(&rec, &bytes).unwrap(), ApplyOutcome::Applied);
+    assert!(b_root.join("foo.txt").exists());
+
+    // A deletes it → tombstone; B applies the tombstone → file removed, row marked deleted.
+    fs::remove_file(a_root.join("foo.txt")).unwrap();
+    let tomb = a.observe_delete(&a_root.join("foo.txt")).unwrap().unwrap();
+    assert!(tomb.deleted);
+    assert_eq!(b.apply_incoming(&tomb, &[]).unwrap(), ApplyOutcome::Applied);
+    assert!(!b_root.join("foo.txt").exists());
+    assert!(b.index().get("foo.txt").unwrap().unwrap().deleted);
+
+    // Re-applying the tombstone is a no-op.
+    assert_eq!(b.apply_incoming(&tomb, &[]).unwrap(), ApplyOutcome::Skipped);
+}
+
+#[test]
+fn concurrent_edits_keep_both() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (a, a_root) = engine_at(&tmp, "A");
+    let (b, b_root) = engine_at(&tmp, "B");
+
+    // Both create foo.txt independently with different content (concurrent clocks).
+    fs::write(a_root.join("foo.txt"), b"AAA").unwrap();
+    let (arec, abytes) = record_of(&a, &a_root, "foo.txt");
+    fs::write(b_root.join("foo.txt"), b"BBB").unwrap();
+    let (brec, bbytes) = record_of(&b, &b_root, "foo.txt");
+
+    // Each applies the other's version → conflict, kept both.
+    let out_a = a.apply_incoming(&brec, &bbytes).unwrap();
+    let out_b = b.apply_incoming(&arec, &abytes).unwrap();
+    let (ApplyOutcome::Conflicted { copy: copy_a }, ApplyOutcome::Conflicted { copy: copy_b }) =
+        (&out_a, &out_b)
+    else {
+        panic!("expected Conflicted on both sides, got {out_a:?} / {out_b:?}");
+    };
+
+    // Deterministic: same canonical content and same conflicted-copy name on both sides.
+    assert_eq!(copy_a, copy_b);
+    assert_eq!(
+        fs::read(a_root.join("foo.txt")).unwrap(),
+        fs::read(b_root.join("foo.txt")).unwrap()
+    );
+
+    // Both versions survive on each side (canonical + conflicted copy).
+    for root in [&a_root, &b_root] {
+        let mut got = vec![
+            fs::read(root.join("foo.txt")).unwrap(),
+            fs::read(root.join(copy_a)).unwrap(),
+        ];
+        got.sort();
+        assert_eq!(got, vec![b"AAA".to_vec(), b"BBB".to_vec()]);
+    }
+
+    // Re-applying converges (identical content → Skip, no new conflict).
+    assert_eq!(a.apply_incoming(&brec, &bbytes).unwrap(), ApplyOutcome::Skipped);
 }
 
 #[test]

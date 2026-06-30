@@ -22,7 +22,11 @@ impl BlobStore {
     }
 
     /// `objects/<first-2-hex>/<rest>` — sharded to avoid one giant flat directory.
+    /// Tombstones carry an empty hash and never touch the store, but guard anyway.
     fn object_path(&self, hash: &str) -> PathBuf {
+        if hash.len() < 2 {
+            return self.root.join("objects").join("__invalid__").join(hash);
+        }
         let (prefix, rest) = hash.split_at(2);
         self.root.join("objects").join(prefix).join(rest)
     }
