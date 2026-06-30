@@ -15,7 +15,7 @@
 //! Echo loops are impossible: an applied push lands in the index, so the watcher's `observe()`
 //! of that write is a no-op (content-addressing).
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, Result};
 use codrop_sync_engine::{Engine, FileRecord};
 use codrop_transport as net;
 use iroh::endpoint::Connection;
@@ -38,8 +38,46 @@ async fn main() -> Result<()> {
     match args.get(1).map(String::as_str) {
         Some("run") => run(&args).await,
         Some("id") => id_cmd(&args),
-        _ => bail!("usage: codrop run <dir> [--peer <id>]  |  codrop id <dir>"),
+        Some("--help") | Some("-h") | Some("help") | None => {
+            print_help();
+            Ok(())
+        }
+        Some("--version") | Some("-V") => {
+            println!("codrop {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
+        Some(other) => {
+            eprintln!("codrop: unknown command '{other}'\n");
+            print_help();
+            std::process::exit(2);
+        }
     }
+}
+
+fn print_help() {
+    print!(
+        "\
+codrop — a Dropbox for devs: live folder sync across your machines, over iroh.
+
+USAGE:
+    codrop run <dir> [--peer <endpoint-id>]   Watch <dir> and sync it live with a peer
+    codrop id  <dir>                          Print <dir>'s stable endpoint id
+    codrop --help                             Show this help
+    codrop --version                          Show the version
+
+EXAMPLES:
+    # machine B: start syncing (its endpoint id prints in the banner)
+    codrop run ~/code
+
+    # machine A: point at B's id — one --peer syncs both directions
+    codrop run ~/code --peer <B-endpoint-id>
+
+NOTES:
+    • Peers connect by EndpointId (a public key) — no IP addresses; works across NAT/relay.
+    • A single --peer gives bidirectional sync; pass it on either side.
+    • State lives in <dir>/.codrop, added to .gitignore automatically.
+"
+    );
 }
 
 /// Print the stable endpoint id for `<dir>` without starting the daemon (generates the key on
