@@ -114,27 +114,36 @@ fn concurrent_edits_keep_both() {
     // Each applies the other's version → conflict, kept both.
     let out_a = a.apply_incoming(&brec, &bbytes).unwrap();
     let out_b = b.apply_incoming(&arec, &abytes).unwrap();
-    let (ApplyOutcome::Conflicted { copy: copy_a }, ApplyOutcome::Conflicted { copy: copy_b }) =
-        (&out_a, &out_b)
-    else {
-        panic!("expected Conflicted on both sides, got {out_a:?} / {out_b:?}");
-    };
+    assert!(matches!(out_a, ApplyOutcome::Conflicted { .. }));
+    assert!(matches!(out_b, ApplyOutcome::Conflicted { .. }));
 
-    // Deterministic: same canonical content and same conflicted-copy name on both sides.
-    assert_eq!(copy_a, copy_b);
+    // Deterministic: both sides converge to the same winner at the canonical path, and the
+    // working tree stays clean (no extra files alongside foo.txt).
     assert_eq!(
         fs::read(a_root.join("foo.txt")).unwrap(),
         fs::read(b_root.join("foo.txt")).unwrap()
     );
-
-    // Both versions survive on each side (canonical + conflicted copy).
     for root in [&a_root, &b_root] {
+        let tree: Vec<_> = fs::read_dir(root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter(|n| n != ".codrop")
+            .collect();
+        assert_eq!(tree, vec![std::ffi::OsString::from("foo.txt")]);
+    }
+
+    // The losing version is preserved under .codrop/conflicts/<path> (same name) on each side,
+    // and is NOT indexed (it doesn't sync).
+    for (e, root) in [(&a, &a_root), (&b, &b_root)] {
+        let backup = root.join(".codrop/conflicts/foo.txt");
+        assert!(backup.exists(), "conflict backup missing under .codrop/conflicts");
         let mut got = vec![
             fs::read(root.join("foo.txt")).unwrap(),
-            fs::read(root.join(copy_a)).unwrap(),
+            fs::read(&backup).unwrap(),
         ];
         got.sort();
         assert_eq!(got, vec![b"AAA".to_vec(), b"BBB".to_vec()]);
+        assert_eq!(e.local_records().unwrap().len(), 1); // only foo.txt is indexed
     }
 
     // Re-applying converges (identical content → Skip, no new conflict).

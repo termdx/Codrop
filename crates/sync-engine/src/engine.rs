@@ -6,7 +6,7 @@
 
 use crate::index::{FileRecord, Index};
 use crate::store::BlobStore;
-use crate::vclock::{Causality, VClock};
+use crate::vclock::Causality;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -48,6 +48,9 @@ pub enum ApplyOutcome {
 pub struct Engine {
     /// Synced tree root; index paths are stored relative to it.
     root: PathBuf,
+    /// Where losing versions of conflicts are preserved (`<state>/conflicts`), mirroring the
+    /// original path. Outside the synced tree, so they don't clutter it or propagate.
+    conflicts_dir: PathBuf,
     store: BlobStore,
     index: Index,
     device_id: String,
@@ -63,6 +66,7 @@ impl Engine {
         let device_id = index.device_id()?;
         Ok(Self {
             root: root.as_ref().to_path_buf(),
+            conflicts_dir: state_dir.join("conflicts"),
             store,
             index,
             device_id,
@@ -258,7 +262,10 @@ impl Engine {
             return Ok(ApplyOutcome::Skipped);
         }
 
-        // both edits, different content → keep both.
+        // both edits, different content → keep both. The winner keeps the canonical path; the
+        // loser is preserved under <state>/conflicts/<path> (same structure & name), outside the
+        // synced tree. It's not indexed, so it neither clutters the tree nor propagates — each
+        // peer independently saves its own losing copy for manual recovery.
         let remote_hash = self.store.put_bytes(bytes)?;
         anyhow::ensure!(
             remote_hash == remote.hash,
@@ -283,37 +290,14 @@ impl Engine {
             deleted: false,
         })?;
 
-        // loser becomes a fresh conflicted copy (deterministic name → converges, no dup).
-        let copy = conflict_name(&remote.path, &loser);
-        self.store.materialize(&loser, &self.root.join(&copy))?;
-        let loser_size = self.store.read(&loser)?.map(|b| b.len()).unwrap_or(0) as u64;
-        let mut copy_clock = VClock::new();
-        copy_clock.increment(&self.device_id);
-        self.index.upsert(&FileRecord {
-            path: copy.clone(),
-            hash: loser,
-            size: loser_size,
-            vclock: copy_clock,
-            updated_ms: now_ms(),
-            deleted: false,
-        })?;
+        // loser → .codrop/conflicts/<path>, preserving folder structure and name.
+        let conflict_path = self.conflicts_dir.join(&remote.path);
+        self.store.materialize(&loser, &conflict_path)?;
 
-        Ok(ApplyOutcome::Conflicted { copy })
+        Ok(ApplyOutcome::Conflicted {
+            copy: conflict_path.to_string_lossy().into_owned(),
+        })
     }
-}
-
-/// Deterministic name for a conflicted copy: `<dir><stem> (conflict <hash8>)<ext>`.
-fn conflict_name(path: &str, loser_hash: &str) -> String {
-    let short = &loser_hash[..8.min(loser_hash.len())];
-    let (dir, file) = match path.rfind('/') {
-        Some(i) => (&path[..=i], &path[i + 1..]),
-        None => ("", path),
-    };
-    let (stem, ext) = match file.rfind('.') {
-        Some(i) if i > 0 => (&file[..i], &file[i..]),
-        _ => (file, ""),
-    };
-    format!("{dir}{stem} (conflict {short}){ext}")
 }
 
 fn now_ms() -> i64 {

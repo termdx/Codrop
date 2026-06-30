@@ -72,8 +72,9 @@ codrop-net pull  ~/projectB <id>      # pull projectA's files into projectB, onc
 ## Behavior & limitations
 
 - **Deletes propagate** across devices (as tombstones).
-- **Concurrent edits keep both versions** — one wins the path (deterministically), the other is
-  saved next to it as a `<name> (conflict <hash>)` copy, so nothing is silently overwritten.
+- **Concurrent edits keep both versions** — one wins the canonical path (deterministically); the
+  other is preserved under `.codrop/conflicts/<same path>` (same name and folder structure), so
+  your working tree stays clean and nothing is silently overwritten.
 - Whole files are transferred on change — there's no block-level delta sync yet.
 - `.env` and other secrets sync in **cleartext** — don't point Codrop at real secrets yet.
 
