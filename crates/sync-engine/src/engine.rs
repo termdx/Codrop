@@ -66,11 +66,7 @@ impl Engine {
         let index = Index::open(state_dir.join("index.sqlite"))?;
         let device_id = index.device_id()?;
 
-        // If our state dir lives inside the synced root, keep it out of the user's git history.
-        if let Ok(rel) = state_dir.strip_prefix(&root) {
-            let entry = format!("{}/", rel.to_string_lossy().replace('\\', "/"));
-            let _ = ensure_gitignore(&root, &entry); // best-effort; never block open
-        }
+        ignore_state_in_git(&root, state_dir); // best-effort; never blocks open
 
         Ok(Self {
             root,
@@ -305,6 +301,16 @@ impl Engine {
         Ok(ApplyOutcome::Conflicted {
             copy: conflict_path.to_string_lossy().into_owned(),
         })
+    }
+}
+
+/// Ensure git ignores `state_dir` when it lives inside the synced `root` — i.e. add e.g.
+/// `.codrop/` to `<root>/.gitignore`. Idempotent and best-effort (errors are swallowed). Shared
+/// by `Engine::open` and the daemon's `id` command so both keep `.codrop` out of git.
+pub fn ignore_state_in_git(root: &Path, state_dir: &Path) {
+    if let Ok(rel) = state_dir.strip_prefix(root) {
+        let entry = format!("{}/", rel.to_string_lossy().replace('\\', "/"));
+        let _ = ensure_gitignore(root, &entry);
     }
 }
 

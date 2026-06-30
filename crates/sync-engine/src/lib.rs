@@ -9,7 +9,7 @@ pub mod index;
 pub mod store;
 pub mod vclock;
 
-pub use engine::{ApplyOutcome, Engine, Observation, SyncAction};
+pub use engine::{ignore_state_in_git, ApplyOutcome, Engine, Observation, SyncAction};
 pub use index::{FileRecord, Index};
 pub use store::BlobStore;
 pub use vclock::{Causality, VClock};

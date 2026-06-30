@@ -48,6 +48,8 @@ fn id_cmd(args: &[String]) -> Result<()> {
     let dir = PathBuf::from(args.get(2).ok_or_else(|| anyhow!("usage: codrop id <dir>"))?);
     std::fs::create_dir_all(&dir)?;
     let key = net::load_or_create_key(&dir.join(".codrop/endpoint.key"))?;
+    // Creating .codrop here too → keep it consistent with `run` and out of git.
+    codrop_sync_engine::ignore_state_in_git(&dir, &dir.join(".codrop"));
     println!("{}", key.public());
     Ok(())
 }
