@@ -104,24 +104,37 @@ async fn run(args: &[String]) -> Result<()> {
 
     println!("live. ctrl-c to stop.");
     while let Some(path) = ev_rx.recv().await {
-        if is_ignored(&path) || !path.is_file() {
+        if is_ignored(&path) {
             continue;
         }
-        let obs = match engine.observe(&path) {
-            Ok(o) => o,
-            Err(e) => {
-                eprintln!("observe {}: {e}", path.display());
-                continue;
-            }
-        };
-        if !obs.changed {
-            continue; // unchanged content (incl. just-applied peer pushes) → no echo
-        }
-        println!("changed: {} ({})", obs.path, &obs.hash[..12]);
 
-        let Some(rec) = engine.index().get(&obs.path)? else { continue };
-        let Some(bytes) = engine.store().read(&obs.hash)? else { continue };
-        broadcast(&peers, &rec, &bytes).await;
+        if path.is_file() {
+            // Create or modify.
+            let obs = match engine.observe(&path) {
+                Ok(o) => o,
+                Err(e) => {
+                    eprintln!("observe {}: {e}", path.display());
+                    continue;
+                }
+            };
+            if !obs.changed {
+                continue; // unchanged content (incl. just-applied peer pushes) → no echo
+            }
+            println!("changed: {} ({})", obs.path, &obs.hash[..12]);
+            let Some(rec) = engine.index().get(&obs.path)? else { continue };
+            let Some(bytes) = engine.store().read(&obs.hash)? else { continue };
+            broadcast(&peers, &rec, &bytes).await;
+        } else if !path.exists() {
+            // Possible deletion of a tracked file → tombstone + propagate (empty content).
+            match engine.observe_delete(&path) {
+                Ok(Some(tomb)) => {
+                    println!("deleted: {}", tomb.path);
+                    broadcast(&peers, &tomb, &[]).await;
+                }
+                Ok(None) => {} // not a tracked live file (dir, temp, already gone)
+                Err(e) => eprintln!("observe_delete {}: {e}", path.display()),
+            }
+        }
     }
 
     Ok(())
@@ -196,9 +209,13 @@ async fn broadcast(peers: &PeerSet, rec: &FileRecord, bytes: &[u8]) {
 /// already has.
 async fn push_all(engine: &Engine, conn: &Connection) -> Result<()> {
     for rec in engine.local_records()? {
-        if let Some(bytes) = engine.store().read(&rec.hash)? {
-            net::push(conn, &rec, &bytes).await?;
-        }
+        // Tombstones carry no blob; everything else ships its content.
+        let bytes = if rec.deleted {
+            Vec::new()
+        } else {
+            engine.store().read(&rec.hash)?.unwrap_or_default()
+        };
+        net::push(conn, &rec, &bytes).await?;
     }
     Ok(())
 }

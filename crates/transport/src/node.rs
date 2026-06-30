@@ -10,7 +10,7 @@
 
 use crate::proto::{read_msg, write_msg, Req, Resp};
 use anyhow::{bail, Result};
-use codrop_sync_engine::{Engine, FileRecord, SyncAction};
+use codrop_sync_engine::{ApplyOutcome, Engine, FileRecord, SyncAction};
 use iroh::endpoint::{presets, Connection};
 use iroh::{Endpoint, EndpointAddr, SecretKey};
 use std::path::Path;
@@ -114,10 +114,9 @@ pub async fn serve_connection(engine: Arc<Engine>, conn: Connection) -> Result<(
                 None => Resp::NotFound,
             },
             Req::Push { record, bytes } => {
-                // Apply only if the pushed version causally supersedes ours.
-                if matches!(engine.evaluate(&record)?, SyncAction::Fetch) {
-                    engine.apply_remote(&record, &bytes)?;
-                    eprintln!("applied push: {}", record.path);
+                let outcome = engine.apply_incoming(&record, &bytes)?;
+                if outcome != ApplyOutcome::Skipped {
+                    eprintln!("push {}: {outcome:?}", record.path);
                 }
                 Resp::Ok
             }
@@ -178,22 +177,42 @@ pub async fn pull_over(engine: &Engine, conn: &Connection) -> Result<SyncStats> 
     };
 
     for rec in &records {
-        match engine.evaluate(rec)? {
-            SyncAction::Skip => stats.skipped += 1,
-            SyncAction::Conflict => {
-                stats.conflicts += 1;
-                eprintln!("conflict: {} (concurrent edit; deferred to Phase 4)", rec.path);
-            }
-            SyncAction::Fetch => match request(conn, &Req::Blob { hash: rec.hash.clone() }).await? {
-                Resp::Blob { bytes } => {
-                    engine.apply_remote(rec, &bytes)?;
-                    stats.fetched += 1;
-                }
-                _ => eprintln!("peer is missing blob {} for {}", rec.hash, rec.path),
-            },
+        // Fast-skip what we already have/supersede; otherwise fetch content (unless it's a
+        // tombstone) and apply with full conflict handling.
+        if engine.evaluate(rec)? == SyncAction::Skip {
+            stats.skipped += 1;
+            continue;
         }
+        let bytes = if rec.deleted {
+            Vec::new()
+        } else {
+            match request(conn, &Req::Blob { hash: rec.hash.clone() }).await? {
+                Resp::Blob { bytes } => bytes,
+                _ => {
+                    eprintln!("peer is missing blob {} for {}", rec.hash, rec.path);
+                    continue;
+                }
+            }
+        };
+        tally(&mut stats, engine.apply_incoming(rec, &bytes)?, &rec.path);
     }
     Ok(stats)
+}
+
+/// Fold an apply outcome into the running sync stats (and log conflicts).
+fn tally(stats: &mut SyncStats, outcome: ApplyOutcome, path: &str) {
+    match outcome {
+        ApplyOutcome::Skipped => stats.skipped += 1,
+        ApplyOutcome::Applied => stats.fetched += 1,
+        ApplyOutcome::ConflictKeptLocal => {
+            stats.conflicts += 1;
+            eprintln!("conflict: kept local edit of {path} (peer deleted it)");
+        }
+        ApplyOutcome::Conflicted { copy } => {
+            stats.conflicts += 1;
+            eprintln!("conflict: {path} — kept both, peer's version at {copy}");
+        }
+    }
 }
 
 /// One request/response on a fresh bidirectional stream.
