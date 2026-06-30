@@ -60,7 +60,9 @@ fn print_help() {
 codrop — a Dropbox for devs: live folder sync across your machines, over iroh.
 
 USAGE:
-    codrop run <dir> [--peer <endpoint-id>]   Watch <dir> and sync it live with a peer
+    codrop run <dir> [--peer <endpoint-id>] [--detach]
+                                              Watch <dir> and sync it live with a peer
+                                              (--detach / -d runs it in the background)
     codrop id  <dir>                          Print <dir>'s stable endpoint id
     codrop --help                             Show this help
     codrop --version                          Show the version
@@ -92,7 +94,66 @@ fn id_cmd(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Re-spawn this binary as a detached background process (new session, output to a log file),
+/// then return so the parent exits. The child runs `run` normally (the flag is stripped).
+fn detach(args: &[String]) -> Result<()> {
+    // Child argv = our args minus the program name and the detach flag.
+    let child_args: Vec<String> = args
+        .iter()
+        .skip(1)
+        .filter(|a| *a != "--detach" && *a != "-d")
+        .cloned()
+        .collect();
+    // child_args == ["run", <dir>, maybe "--peer", <id>]
+    let dir_arg = child_args
+        .get(1)
+        .ok_or_else(|| anyhow!("usage: codrop run <dir> [--peer <id>] --detach"))?;
+    let dir = PathBuf::from(dir_arg.as_str());
+
+    let state = dir.join(".codrop");
+    std::fs::create_dir_all(&state)?;
+    let log_path = state.join("daemon.log");
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
+    let log_err = log.try_clone()?;
+
+    let mut cmd = std::process::Command::new(std::env::current_exe()?);
+    cmd.args(&child_args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(log))
+        .stderr(std::process::Stdio::from(log_err));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: setsid() is async-signal-safe and runs in the forked child before exec,
+        // giving it a new session so it survives the terminal/shell closing.
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+
+    let child = cmd.spawn()?;
+    println!("codrop: running detached (pid {})", child.id());
+    println!("  logs:  {}", log_path.display());
+    println!("  id:    codrop id {}", dir.display());
+    println!("  stop:  kill {}", child.id());
+    Ok(())
+}
+
 async fn run(args: &[String]) -> Result<()> {
+    // --detach: re-spawn ourselves as a background process and return, before any heavy init.
+    if args.iter().any(|a| a == "--detach" || a == "-d") {
+        return detach(args);
+    }
+
     let dir = PathBuf::from(args.get(2).ok_or_else(|| anyhow!("usage: codrop run <dir> [--peer <id>]"))?);
     std::fs::create_dir_all(&dir)?;
     let root = dir.canonicalize()?;

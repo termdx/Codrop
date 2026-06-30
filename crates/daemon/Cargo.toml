@@ -18,3 +18,6 @@ notify.workspace = true
 notify-debouncer-full.workspace = true
 codrop-sync-engine.workspace = true
 codrop-transport.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true   # setsid() for --detach

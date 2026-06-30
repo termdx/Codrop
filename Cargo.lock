@@ -348,6 +348,7 @@ dependencies = [
  "codrop-sync-engine",
  "codrop-transport",
  "iroh",
+ "libc",
  "notify",
  "notify-debouncer-full",
  "tokio",
