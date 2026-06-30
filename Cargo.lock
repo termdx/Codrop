@@ -351,6 +351,8 @@ dependencies = [
  "libc",
  "notify",
  "notify-debouncer-full",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 

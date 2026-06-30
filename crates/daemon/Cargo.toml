@@ -18,6 +18,8 @@ notify.workspace = true
 notify-debouncer-full.workspace = true
 codrop-sync-engine.workspace = true
 codrop-transport.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-libc.workspace = true   # setsid() for --detach
+libc.workspace = true   # setsid()/kill() for --detach, stop, status

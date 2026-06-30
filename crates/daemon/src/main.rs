@@ -22,10 +22,28 @@ use iroh::endpoint::Connection;
 use iroh::{Endpoint, EndpointId};
 use notify::{RecursiveMode, Watcher};
 use notify_debouncer_full::new_debouncer;
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
+
+/// Snapshot the daemon writes to `<dir>/.codrop/status.json` for `status`/`stop` to read.
+#[derive(Serialize, Deserialize)]
+struct Status {
+    pid: u32,
+    endpoint_id: String,
+    files: usize,
+    peers: Vec<PeerStatus>,
+    updated_ms: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PeerStatus {
+    id: String,
+    connected: bool,
+}
 
 const IGNORE: &[&str] = &[".codrop", "node_modules", ".git", "target", "dist", "build", ".next"];
 
@@ -38,6 +56,8 @@ async fn main() -> Result<()> {
     match args.get(1).map(String::as_str) {
         Some("run") => run(&args).await,
         Some("id") => id_cmd(&args),
+        Some("status") => status_cmd(&args),
+        Some("stop") => stop_cmd(&args),
         Some("--help") | Some("-h") | Some("help") | None => {
             print_help();
             Ok(())
@@ -63,7 +83,9 @@ USAGE:
     codrop run <dir> [--peer <endpoint-id>] [--detach]
                                               Watch <dir> and sync it live with a peer
                                               (--detach / -d runs it in the background)
-    codrop id  <dir>                          Print <dir>'s stable endpoint id
+    codrop id     <dir>                       Print <dir>'s stable endpoint id
+    codrop status <dir>                       Show daemon status: connected peers + sync state
+    codrop stop   <dir>                       Stop the daemon running for <dir>
     codrop --help                             Show this help
     codrop --version                          Show the version
 
@@ -92,6 +114,137 @@ fn id_cmd(args: &[String]) -> Result<()> {
     codrop_sync_engine::ignore_state_in_git(&dir, &dir.join(".codrop"));
     println!("{}", key.public());
     Ok(())
+}
+
+/// Read the daemon's published status for `<dir>` and print peers + sync state.
+fn status_cmd(args: &[String]) -> Result<()> {
+    let dir = PathBuf::from(args.get(2).ok_or_else(|| anyhow!("usage: codrop status <dir>"))?);
+    let status = match read_status(&dir)? {
+        Some(s) => s,
+        None => {
+            println!("codrop: not running for {} (no daemon)", dir.display());
+            return Ok(());
+        }
+    };
+    if !pid_alive(status.pid) {
+        println!("codrop: not running ({} — last pid {} is gone)", dir.display(), status.pid);
+        return Ok(());
+    }
+
+    let age = (now_ms() - status.updated_ms).max(0) / 1000;
+    println!("codrop: running (pid {})", status.pid);
+    println!("  endpoint id: {}", status.endpoint_id);
+    println!("  tracking:    {} files", status.files);
+    println!("  status:      live ({age}s ago)");
+    if status.peers.is_empty() {
+        println!("  peers:       none connected");
+    } else {
+        println!("  peers:       {} connected", status.peers.len());
+        for p in &status.peers {
+            let mark = if p.connected { "●" } else { "○" };
+            println!("    {mark} {}", p.id);
+        }
+    }
+    Ok(())
+}
+
+/// Stop the daemon running for `<dir>` (SIGTERM to its recorded pid).
+fn stop_cmd(args: &[String]) -> Result<()> {
+    let dir = PathBuf::from(args.get(2).ok_or_else(|| anyhow!("usage: codrop stop <dir>"))?);
+    let pid = match read_status(&dir)? {
+        Some(s) => s.pid,
+        None => {
+            println!("codrop: not running for {} (no daemon)", dir.display());
+            return Ok(());
+        }
+    };
+    let status_path = dir.join(".codrop/status.json");
+    if !pid_alive(pid) {
+        println!("codrop: not running (pid {pid} already gone)");
+        let _ = std::fs::remove_file(&status_path);
+        return Ok(());
+    }
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(pid as i32, libc::SIGTERM);
+    }
+    let _ = std::fs::remove_file(&status_path);
+    println!("codrop: stopped (pid {pid})");
+    Ok(())
+}
+
+fn read_status(dir: &Path) -> Result<Option<Status>> {
+    match std::fs::read_to_string(dir.join(".codrop/status.json")) {
+        Ok(data) => Ok(Some(
+            serde_json::from_str(&data).map_err(|e| anyhow!("corrupt status file: {e}"))?,
+        )),
+        Err(_) => Ok(None),
+    }
+}
+
+/// True if a process with `pid` exists (signal 0 probe). Assumes same-user ownership.
+fn pid_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
+/// Periodically publish the daemon's live status to `<state>/status.json`.
+fn spawn_status_writer(state_dir: PathBuf, endpoint: Endpoint, engine: Arc<Engine>, peers: PeerSet) {
+    tokio::spawn(async move {
+        loop {
+            let snapshot = snapshot_status(&endpoint, &engine, &peers).await;
+            let _ = write_status(&state_dir, &snapshot);
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    });
+}
+
+async fn snapshot_status(endpoint: &Endpoint, engine: &Engine, peers: &PeerSet) -> Status {
+    let mut set = peers.lock().await;
+    set.retain(|c| c.close_reason().is_none());
+    let mut seen = HashSet::new();
+    let peer_list: Vec<PeerStatus> = set
+        .iter()
+        .map(|c| c.remote_id().to_string())
+        .filter(|id| seen.insert(id.clone())) // dedup (inbound + outbound to same peer)
+        .map(|id| PeerStatus { id, connected: true })
+        .collect();
+    drop(set);
+
+    let files = engine
+        .local_records()
+        .map(|r| r.iter().filter(|x| !x.deleted).count())
+        .unwrap_or(0);
+
+    Status {
+        pid: std::process::id(),
+        endpoint_id: endpoint.id().to_string(),
+        files,
+        peers: peer_list,
+        updated_ms: now_ms(),
+    }
+}
+
+fn write_status(state_dir: &Path, status: &Status) -> Result<()> {
+    let tmp = state_dir.join("status.json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(status)?)?;
+    std::fs::rename(&tmp, state_dir.join("status.json"))?;
+    Ok(())
+}
+
+fn now_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 /// Re-spawn this binary as a detached background process (new session, output to a log file),
@@ -185,6 +338,7 @@ async fn run(args: &[String]) -> Result<()> {
     if let Some(peer) = peer {
         spawn_peer_link(endpoint.clone(), engine.clone(), peers.clone(), peer);
     }
+    spawn_status_writer(root.join(".codrop"), endpoint.clone(), engine.clone(), peers.clone());
 
     // File watcher on a dedicated thread; events bridged to this async loop.
     let (raw_tx, raw_rx) = std::sync::mpsc::channel();
