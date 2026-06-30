@@ -25,24 +25,46 @@ Binaries land in `target/release/`: `codrop` (the daemon), plus `codrop-net` and
 
 ## Usage — the `codrop` daemon
 
+```
+codrop run <dir> [--peer <endpoint-id>] [--detach]   watch <dir> and sync it with a peer
+codrop id     <dir>                                  print <dir>'s stable endpoint id
+codrop status <dir>                                  show connected peers + sync state
+codrop stop   <dir>                                  stop the daemon for <dir>
+codrop --help | --version
+```
+
 Run the daemon on each machine and point one at the other. A **single `--peer` gives
 bidirectional sync**.
 
 ```bash
-# machine B — print its stable id (or just run it and read the banner)
-codrop id ~/code
-#   d951e2ed584d...
-
-# machine B — start syncing ~/code
+# machine B — get its stable id, then start syncing ~/code
+codrop id ~/code            #  d951e2ed584d...   (also printed in the run banner)
 codrop run ~/code
 
-# machine A — sync ~/code with machine B
+# machine A — sync ~/code with machine B (one --peer syncs both ways)
 codrop run ~/code --peer d951e2ed584d...
 ```
 
 Now edits in `~/code` on either machine appear on the other within about a second. On connect,
-the two sides converge automatically (each receives the other's files); the link reconnects on
-its own if the network drops.
+the two sides converge automatically (each receives the other's files); the `--peer` link
+reconnects on its own if the network drops.
+
+### Run in the background
+
+```bash
+codrop run ~/code --peer d951e2ed584d... --detach   # backgrounds it (new session)
+#   codrop: running detached (pid 21063)
+#     logs:  ~/code/.codrop/daemon.log
+
+codrop status ~/code        # is it up? who's connected?
+#   codrop: running (pid 21063)
+#     tracking:    42 files
+#     status:      live (1s ago)
+#     peers:       1 connected
+#       ● e18373aabf1e...
+
+codrop stop ~/code          # stop it
+```
 
 - **Stable identity.** A device key lives in `<dir>/.codrop/endpoint.key`, so a device's id is
   the same across restarts. `codrop id <dir>` prints it without starting the daemon.
