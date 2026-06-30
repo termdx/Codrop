@@ -9,19 +9,47 @@ over an encrypted peer-to-peer connection. Devices are identified and authentica
 key — you never deal with IP addresses, and it works across LAN, NAT, and restrictive Wi-Fi
 (direct when possible, relayed when the network won't allow direct).
 
-## Build
+## Build & install
 
-Requires **Rust ≥ 1.91**.
+There's no hosted package yet, so build from source. Requires **Rust ≥ 1.91** (install via
+[rustup](https://rustup.rs)).
 
 ```bash
 git clone https://github.com/termdx/Codrop.git
 cd Codrop
-cargo build --release
 ```
 
-Binaries land in `target/release/`: `codrop` (the daemon), plus `codrop-net` and
-`codrop-watchd`. Add that directory to your `PATH`, install with
-`cargo install --path crates/daemon`, or prefix the commands below with `./target/release/`.
+### Option A — install the `codrop` command (recommended)
+
+`cargo install` compiles in release mode and copies the binary into `~/.cargo/bin`, which
+rustup already puts on your `PATH` — so `codrop` works from anywhere:
+
+```bash
+cargo install --path crates/daemon       # installs `codrop`
+cargo install --path crates/transport    # optional: installs `codrop-net` (one-shot sync)
+```
+
+Verify:
+
+```bash
+codrop --version
+```
+
+> If `codrop` isn't found afterwards, add Cargo's bin dir to your shell profile:
+> `export PATH="$HOME/.cargo/bin:$PATH"`.
+
+### Option B — build and link manually
+
+Build once, then put the binary on your `PATH` yourself (symlink so `git pull` + rebuild
+stays current):
+
+```bash
+cargo build --release
+# binaries are in target/release/: codrop, codrop-net, codrop-watchd
+ln -sf "$PWD/target/release/codrop" ~/.local/bin/codrop   # ensure ~/.local/bin is on PATH
+```
+
+Or skip installing and just run in place: `./target/release/codrop --help`.
 
 ## Usage — the `codrop` daemon
 
