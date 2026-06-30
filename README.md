@@ -69,10 +69,12 @@ codrop-net pull  ~/projectB <id>      # pull projectA's files into projectB, onc
   prevents sync echo loops.
 - On macOS, files are materialized with copy-on-write (`clonefile`); other platforms copy.
 
-## Current limitations
+## Behavior & limitations
 
-- Concurrent edits to the same file aren't yet turned into conflicted-copies, and file deletes
-  aren't yet propagated.
+- **Deletes propagate** across devices (as tombstones).
+- **Concurrent edits keep both versions** — one wins the path (deterministically), the other is
+  saved next to it as a `<name> (conflict <hash>)` copy, so nothing is silently overwritten.
+- Whole files are transferred on change — there's no block-level delta sync yet.
 - `.env` and other secrets sync in **cleartext** — don't point Codrop at real secrets yet.
 
 ## Layout
