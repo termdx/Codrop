@@ -48,6 +48,8 @@ its own if the network drops.
   the same across restarts. `codrop id <dir>` prints it without starting the daemon.
 - **Ignored by default:** `node_modules`, `.git`, `target`, `dist`, `build`, `.next` — the
   OS/toolchain-specific directories you don't want to sync.
+- **Git-friendly:** Codrop adds `.codrop/` to the folder's `.gitignore`, so its own state
+  never lands in your commits.
 
 ## One-shot sync — `codrop-net`
 

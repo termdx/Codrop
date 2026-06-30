@@ -60,12 +60,20 @@ impl Engine {
     /// Open (or create) an engine. Durable state lives under `state_dir`; the synced tree
     /// is `root`. Keep `state_dir` outside (or ignored within) `root` to avoid self-echo.
     pub fn open(root: impl AsRef<Path>, state_dir: impl AsRef<Path>) -> Result<Self> {
+        let root = root.as_ref().to_path_buf();
         let state_dir = state_dir.as_ref();
         let store = BlobStore::open(state_dir.join("blobs"))?;
         let index = Index::open(state_dir.join("index.sqlite"))?;
         let device_id = index.device_id()?;
+
+        // If our state dir lives inside the synced root, keep it out of the user's git history.
+        if let Ok(rel) = state_dir.strip_prefix(&root) {
+            let entry = format!("{}/", rel.to_string_lossy().replace('\\', "/"));
+            let _ = ensure_gitignore(&root, &entry); // best-effort; never block open
+        }
+
         Ok(Self {
-            root: root.as_ref().to_path_buf(),
+            root,
             conflicts_dir: state_dir.join("conflicts"),
             store,
             index,
@@ -298,6 +306,28 @@ impl Engine {
             copy: conflict_path.to_string_lossy().into_owned(),
         })
     }
+}
+
+/// Ensure `<root>/.gitignore` contains `entry` (e.g. `.codrop/`). Idempotent: matches an
+/// existing line whether or not it has a trailing slash, and appends with clean newlines.
+fn ensure_gitignore(root: &Path, entry: &str) -> Result<()> {
+    let path = root.join(".gitignore");
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let needle = entry.trim_end_matches('/');
+    if existing
+        .lines()
+        .any(|l| l.trim().trim_end_matches('/') == needle)
+    {
+        return Ok(());
+    }
+    let mut content = existing;
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push_str(entry);
+    content.push('\n');
+    std::fs::write(&path, content)?;
+    Ok(())
 }
 
 fn now_ms() -> i64 {

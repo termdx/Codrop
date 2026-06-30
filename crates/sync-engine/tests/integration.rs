@@ -127,7 +127,7 @@ fn concurrent_edits_keep_both() {
         let tree: Vec<_> = fs::read_dir(root)
             .unwrap()
             .map(|e| e.unwrap().file_name())
-            .filter(|n| n != ".codrop")
+            .filter(|n| n != ".codrop" && n != ".gitignore")
             .collect();
         assert_eq!(tree, vec![std::ffi::OsString::from("foo.txt")]);
     }
@@ -148,6 +148,24 @@ fn concurrent_edits_keep_both() {
 
     // Re-applying converges (identical content → Skip, no new conflict).
     assert_eq!(a.apply_incoming(&brec, &bbytes).unwrap(), ApplyOutcome::Skipped);
+}
+
+#[test]
+fn state_dir_is_gitignored() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_a, root) = engine_at(&tmp, "A");
+
+    // Opening the engine adds .codrop/ to the root .gitignore.
+    let gi = fs::read_to_string(root.join(".gitignore")).unwrap();
+    assert!(gi.lines().any(|l| l.trim().trim_end_matches('/') == ".codrop"));
+
+    // Idempotent and non-destructive: a pre-existing .gitignore keeps its entries and gets
+    // .codrop appended exactly once.
+    fs::write(root.join(".gitignore"), "target/\n").unwrap();
+    let _b = Engine::open(&root, root.join(".codrop")).unwrap();
+    let gi2 = fs::read_to_string(root.join(".gitignore")).unwrap();
+    assert!(gi2.contains("target/"));
+    assert_eq!(gi2.matches(".codrop").count(), 1);
 }
 
 #[test]
