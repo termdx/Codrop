@@ -3,6 +3,7 @@ name = "codrop-daemon"
 description = "Codrop live-sync daemon: watch a folder and sync changes to peers over iroh."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 

@@ -3,6 +3,7 @@ name = "codrop-sync-engine"
 description = "Codrop Phase 1: content-addressed store, SQLite index, vector clocks."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 

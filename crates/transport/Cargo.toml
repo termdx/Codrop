@@ -3,6 +3,7 @@ name = "codrop-transport"
 description = "Codrop Phase 2: iroh p2p transport (hole-punch + relay), index/blob sync."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
