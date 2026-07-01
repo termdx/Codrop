@@ -151,6 +151,58 @@ fn concurrent_edits_keep_both() {
 }
 
 #[test]
+fn chunking_dedups_and_deltas() {
+    use codrop_sync_engine::BlobStore;
+    let tmp = tempfile::tempdir().unwrap();
+    let store = BlobStore::open(tmp.path()).unwrap();
+    let objects = tmp.path().join("objects");
+
+    // A large pseudo-random blob → many distinct chunks.
+    let mut seed = 0x1234_5678u64;
+    let mut a = vec![0u8; 300_000];
+    for byte in a.iter_mut() {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *byte = (seed >> 33) as u8;
+    }
+    let ha = store.put_bytes(&a).unwrap();
+    let objs1 = count_files(&objects);
+    assert!(objs1 > 5, "expected the blob to split into several chunks, got {objs1}");
+
+    // Storing identical content again adds nothing (full dedup).
+    store.put_bytes(&a).unwrap();
+    assert_eq!(count_files(&objects), objs1);
+
+    // A one-byte edit changes only a chunk or two (content-defined boundaries localize it).
+    let mut b = a.clone();
+    b[150_000] ^= 0xFF;
+    let hb = store.put_bytes(&b).unwrap();
+    assert_ne!(ha, hb);
+    let new = count_files(&objects) - objs1;
+    assert!((1..5).contains(&new), "expected a few new chunks, got {new} of {objs1}");
+
+    // Reassembly is exact for both versions.
+    assert_eq!(store.read(&ha).unwrap().unwrap(), a);
+    assert_eq!(store.read(&hb).unwrap().unwrap(), b);
+}
+
+fn count_files(dir: &std::path::Path) -> usize {
+    let mut n = 0;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&d) else { continue };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+#[test]
 fn state_dir_is_gitignored() {
     let tmp = tempfile::tempdir().unwrap();
     let (_a, root) = engine_at(&tmp, "A");

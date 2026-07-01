@@ -23,6 +23,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 libc = "0.2"
 tempfile = "3"
+fastcdc = "3"
 # Phase 2 — transport + discovery
 quinn = "0.11"
 rustls = "0.23"
