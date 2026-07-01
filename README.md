@@ -114,6 +114,8 @@ codrop-net pull  ~/projectB <id>      # pull projectA's files into projectB, onc
 
 - Every change is **content-addressed** (BLAKE3) into a local blob store and recorded in a
   SQLite index keyed `path → hash → vector clock` (under `.codrop/`).
+- Content is split into content-defined chunks (FastCDC), each stored by hash; a file is a
+  manifest of chunk hashes. Syncing transfers only the chunks a peer lacks.
 - Devices sync over **iroh** (QUIC). Peers are addressed by `EndpointId` (an Ed25519 public
   key) that also authenticates them; connectivity escalates direct → hole-punched → relayed.
 - **Vector clocks** (not wall-clock time) order changes, so a newer edit is distinguishable
@@ -127,7 +129,9 @@ codrop-net pull  ~/projectB <id>      # pull projectA's files into projectB, onc
 - **Concurrent edits keep both versions** — one wins the canonical path (deterministically); the
   other is preserved under `.codrop/conflicts/<same path>` (same name and folder structure), so
   your working tree stays clean and nothing is silently overwritten.
-- Whole files are transferred on change — there's no block-level delta sync yet.
+- **Only changed data moves.** Files are split into content-defined chunks; a peer transfers
+  just the chunks it's missing, so a small edit to a large file syncs a chunk or two, and
+  identical content is deduplicated across files and versions.
 - `.env` and other secrets sync in **cleartext** — don't point Codrop at real secrets yet.
 
 ## Layout
