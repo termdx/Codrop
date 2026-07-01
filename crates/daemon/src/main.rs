@@ -45,7 +45,7 @@ struct PeerStatus {
     connected: bool,
 }
 
-const IGNORE: &[&str] = &[".codrop", "node_modules", ".git", "target", "dist", "build", ".next"];
+use codrop_sync_engine::IGNORE_DIRS as IGNORE;
 
 /// Live connections to peers (inbound + the outbound `--peer` link).
 type PeerSet = Arc<Mutex<Vec<Connection>>>;
@@ -56,6 +56,7 @@ async fn main() -> Result<()> {
     match args.get(1).map(String::as_str) {
         Some("run") => run(&args).await,
         Some("id") => id_cmd(&args),
+        Some("trust") => trust_cmd(&args),
         Some("status") => status_cmd(&args),
         Some("stop") => stop_cmd(&args),
         Some("--help") | Some("-h") | Some("help") | None => {
@@ -84,6 +85,7 @@ USAGE:
                                               Watch <dir> and sync it live with a peer
                                               (--detach / -d runs it in the background)
     codrop id     <dir>                       Print <dir>'s stable endpoint id
+    codrop trust  <dir> <endpoint-id>         Allow a peer to connect to <dir>'s daemon
     codrop status <dir>                       Show daemon status: connected peers + sync state
     codrop stop   <dir>                       Stop the daemon running for <dir>
     codrop --help                             Show this help
@@ -98,7 +100,8 @@ EXAMPLES:
 
 NOTES:
     • Peers connect by EndpointId (a public key) — no IP addresses; works across NAT/relay.
-    • A single --peer gives bidirectional sync; pass it on either side.
+    • A daemon only accepts peers it trusts: `--peer <id>` trusts that id; the other side must
+      `codrop trust <your-id>` (get yours with `codrop id`). Trust persists in .codrop/peers.
     • State lives in <dir>/.codrop, added to .gitignore automatically.
 "
     );
@@ -113,6 +116,49 @@ fn id_cmd(args: &[String]) -> Result<()> {
     // Creating .codrop here too → keep it consistent with `run` and out of git.
     codrop_sync_engine::ignore_state_in_git(&dir, &dir.join(".codrop"));
     println!("{}", key.public());
+    Ok(())
+}
+
+/// Add an endpoint id to `<dir>`'s trusted-peers allowlist so its daemon will accept it.
+fn trust_cmd(args: &[String]) -> Result<()> {
+    let dir = PathBuf::from(args.get(2).ok_or_else(|| anyhow!("usage: codrop trust <dir> <id>"))?);
+    let id: EndpointId = args
+        .get(3)
+        .ok_or_else(|| anyhow!("usage: codrop trust <dir> <id>"))?
+        .parse()
+        .map_err(|e| anyhow!("invalid endpoint id: {e}"))?;
+    std::fs::create_dir_all(dir.join(".codrop"))?;
+    trust_peer(&dir, id)?;
+    println!("codrop: trusting {id} for {}", dir.display());
+    Ok(())
+}
+
+/// The trusted-peers allowlist file.
+fn peers_file(dir: &Path) -> PathBuf {
+    dir.join(".codrop/peers")
+}
+
+/// Load the trusted endpoint ids for `<dir>` (unknown/garbage lines are ignored).
+fn load_trusted(dir: &Path) -> Vec<EndpointId> {
+    std::fs::read_to_string(peers_file(dir))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.trim().parse::<EndpointId>().ok())
+        .collect()
+}
+
+/// Add `id` to the trusted allowlist (idempotent, persisted).
+fn trust_peer(dir: &Path, id: EndpointId) -> Result<()> {
+    let mut trusted = load_trusted(dir);
+    if trusted.contains(&id) {
+        return Ok(());
+    }
+    trusted.push(id);
+    let body: String = trusted.iter().map(|i| format!("{i}\n")).collect();
+    if let Some(parent) = peers_file(dir).parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(peers_file(dir), body)?;
     Ok(())
 }
 
@@ -321,6 +367,12 @@ async fn run(args: &[String]) -> Result<()> {
         None => None,
     };
 
+    // A dialed peer is implicitly trusted (and remembered); the accept loop rejects everyone else.
+    if let Some(p) = peer {
+        trust_peer(&dir, p)?;
+    }
+    let trusted = Arc::new(load_trusted(&root));
+
     let engine = Arc::new(Engine::open(&root, root.join(".codrop"))?);
     let indexed = scan(&engine, &root)?;
 
@@ -328,13 +380,14 @@ async fn run(args: &[String]) -> Result<()> {
     let endpoint = net::endpoint_with_key(key).await?;
     println!("codrop: watching {} ({indexed} files)", root.display());
     println!("  endpoint id: {}", endpoint.id());
+    println!("  trusting {} peer(s)", trusted.len());
     if let Some(p) = peer {
         println!("  peer: {p}");
     }
 
     let peers: PeerSet = Arc::new(Mutex::new(Vec::new()));
 
-    spawn_accept_loop(endpoint.clone(), engine.clone(), peers.clone());
+    spawn_accept_loop(endpoint.clone(), engine.clone(), peers.clone(), trusted.clone());
     if let Some(peer) = peer {
         spawn_peer_link(endpoint.clone(), engine.clone(), peers.clone(), peer);
     }
@@ -394,15 +447,27 @@ async fn run(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Accept inbound connections: register each one and serve it (it also carries our pushes).
-fn spawn_accept_loop(endpoint: Endpoint, engine: Arc<Engine>, peers: PeerSet) {
+/// Accept inbound connections from **trusted** peers only, register each, and serve it.
+fn spawn_accept_loop(
+    endpoint: Endpoint,
+    engine: Arc<Engine>,
+    peers: PeerSet,
+    trusted: Arc<Vec<EndpointId>>,
+) {
     tokio::spawn(async move {
         while let Some(incoming) = endpoint.accept().await {
             let engine = engine.clone();
             let peers = peers.clone();
+            let trusted = trusted.clone();
             tokio::spawn(async move {
                 if let Ok(conn) = incoming.await {
-                    println!("peer connected: {}", conn.remote_id().fmt_short());
+                    let id = conn.remote_id();
+                    if !trusted.contains(&id) {
+                        eprintln!("rejected untrusted peer {} (codrop trust to allow)", id.fmt_short());
+                        conn.close(0u32.into(), b"untrusted");
+                        return;
+                    }
+                    println!("peer connected: {}", id.fmt_short());
                     peers.lock().await.push(conn.clone());
                     let _ = net::serve_connection(engine, conn).await;
                 }
@@ -424,6 +489,16 @@ fn spawn_peer_link(endpoint: Endpoint, engine: Arc<Engine>, peers: PeerSet, peer
             if !connected {
                 if let Ok(conn) = net::connect(&endpoint, peer).await {
                     println!("connected to peer {}", peer.fmt_short());
+                    // Serve our side FIRST — push_all is now a notification, so the peer fetches
+                    // chunks back over this connection while we're still inside push_all.
+                    peers.lock().await.push(conn.clone());
+                    {
+                        let engine = engine.clone();
+                        let conn = conn.clone();
+                        tokio::spawn(async move {
+                            let _ = net::serve_connection(engine, conn).await;
+                        });
+                    }
                     match net::pull_over(&engine, &conn).await {
                         Ok(stats) => println!("  initial pull: {stats:?}"),
                         Err(e) => eprintln!("  initial pull failed: {e}"),
@@ -431,11 +506,6 @@ fn spawn_peer_link(endpoint: Endpoint, engine: Arc<Engine>, peers: PeerSet, peer
                     if let Err(e) = push_all(&engine, &conn).await {
                         eprintln!("  initial push failed: {e}");
                     }
-                    peers.lock().await.push(conn.clone());
-                    let engine = engine.clone();
-                    tokio::spawn(async move {
-                        let _ = net::serve_connection(engine, conn).await;
-                    });
                 }
             }
             tokio::time::sleep(Duration::from_secs(5)).await;

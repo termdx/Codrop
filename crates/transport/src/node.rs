@@ -170,6 +170,13 @@ async fn fetch_and_apply(
             }
         }
         engine.store().put_manifest(&record.hash, &chunks)?;
+        // The chunks are each hash-verified, but a malicious manifest could concatenate valid
+        // chunks into content that doesn't match record.hash — verify the whole before applying.
+        anyhow::ensure!(
+            engine.store().verify_content(&record.hash)?,
+            "content for {} failed hash verification",
+            record.path
+        );
     }
     engine.apply_incoming(record)
 }

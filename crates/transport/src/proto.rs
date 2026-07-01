@@ -38,11 +38,16 @@ pub async fn write_msg<T: Serialize>(send: &mut iroh::endpoint::SendStream, msg:
     Ok(())
 }
 
+/// Upper bound on a single framed message, to stop a peer's length prefix from triggering a
+/// multi-GiB allocation (DoS). Generous headroom over any real index/manifest/chunk message.
+const MAX_MSG: usize = 256 * 1024 * 1024;
+
 /// Read one length-prefixed JSON message.
 pub async fn read_msg<T: DeserializeOwned>(recv: &mut iroh::endpoint::RecvStream) -> anyhow::Result<T> {
     let mut len = [0u8; 4];
     recv.read_exact(&mut len).await?;
     let n = u32::from_be_bytes(len) as usize;
+    anyhow::ensure!(n <= MAX_MSG, "peer message too large: {n} bytes (max {MAX_MSG})");
     let mut body = vec![0u8; n];
     recv.read_exact(&mut body).await?;
     Ok(serde_json::from_slice(&body)?)

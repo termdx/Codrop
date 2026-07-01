@@ -156,6 +156,98 @@ fn concurrent_edits_keep_both() {
 }
 
 #[test]
+fn rejects_unsafe_peer_paths() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (e, _root) = engine_at(&tmp, "E");
+
+    let evil = |path: &str, deleted: bool| FileRecord {
+        path: path.into(),
+        hash: "00".into(),
+        size: 0,
+        vclock: VClock::new(),
+        updated_ms: 0,
+        deleted,
+    };
+    // Absolute, parent-traversal, and a traversal tombstone are all rejected before touching fs.
+    assert!(e.apply_incoming(&evil("/etc/pwned", false)).is_err());
+    assert!(e.apply_incoming(&evil("../escape.txt", false)).is_err());
+    assert!(e.apply_incoming(&evil("../../.ssh/authorized_keys", true)).is_err());
+    assert!(e.apply_incoming(&evil("a/../../b", false)).is_err());
+}
+
+#[test]
+fn verify_content_catches_tampering() {
+    use codrop_sync_engine::BlobStore;
+    let tmp = tempfile::tempdir().unwrap();
+    let store = BlobStore::open(tmp.path()).unwrap();
+
+    let real = store.put_bytes(b"the real content").unwrap();
+    assert!(store.verify_content(&real).unwrap());
+
+    // A lying manifest: point a bogus full-hash at the real (individually-valid) chunks.
+    // Reassembly won't equal the claimed hash, so verification must fail.
+    let chunks = store.get_manifest(&real).unwrap().unwrap();
+    let fake = "0".repeat(64);
+    store.put_manifest(&fake, &chunks).unwrap();
+    assert!(!store.verify_content(&fake).unwrap());
+}
+
+#[test]
+fn concurrent_delete_vs_edit_keeps_edit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (a, a_root) = engine_at(&tmp, "A");
+    let (b, b_root) = engine_at(&tmp, "B");
+
+    // Both start with foo.txt in sync.
+    fs::write(a_root.join("foo.txt"), b"v1").unwrap();
+    let (rec1, bytes1) = record_of(&a, &a_root, "foo.txt");
+    b.store().put_bytes(&bytes1).unwrap();
+    b.apply_incoming(&rec1).unwrap();
+
+    // A deletes; B edits — concurrent.
+    fs::remove_file(a_root.join("foo.txt")).unwrap();
+    let tomb = a.observe_delete(&a_root.join("foo.txt")).unwrap().unwrap();
+    fs::write(b_root.join("foo.txt"), b"v2-edited").unwrap();
+    let (rec2, bytes2) = record_of(&b, &b_root, "foo.txt");
+
+    // B applies A's delete → its edit wins (file kept).
+    assert_eq!(b.apply_incoming(&tomb).unwrap(), ApplyOutcome::ConflictKeptLocal);
+    assert_eq!(fs::read(b_root.join("foo.txt")).unwrap(), b"v2-edited");
+
+    // A applies B's edit → resurrects over its own delete.
+    a.store().put_bytes(&bytes2).unwrap();
+    assert_eq!(a.apply_incoming(&rec2).unwrap(), ApplyOutcome::Applied);
+    assert_eq!(fs::read(a_root.join("foo.txt")).unwrap(), b"v2-edited");
+}
+
+#[test]
+fn concurrent_delete_vs_delete_converges() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (a, a_root) = engine_at(&tmp, "A");
+    let (b, b_root) = engine_at(&tmp, "B");
+
+    fs::write(a_root.join("foo.txt"), b"v1").unwrap();
+    let (rec1, bytes1) = record_of(&a, &a_root, "foo.txt");
+    b.store().put_bytes(&bytes1).unwrap();
+    b.apply_incoming(&rec1).unwrap();
+
+    // Both delete concurrently, then exchange tombstones.
+    fs::remove_file(a_root.join("foo.txt")).unwrap();
+    let tomb_a = a.observe_delete(&a_root.join("foo.txt")).unwrap().unwrap();
+    fs::remove_file(b_root.join("foo.txt")).unwrap();
+    let tomb_b = b.observe_delete(&b_root.join("foo.txt")).unwrap().unwrap();
+
+    b.apply_incoming(&tomb_a).unwrap();
+    a.apply_incoming(&tomb_b).unwrap();
+
+    // Both converge to "deleted"; no resurrection.
+    assert!(!a_root.join("foo.txt").exists());
+    assert!(!b_root.join("foo.txt").exists());
+    assert!(a.index().get("foo.txt").unwrap().unwrap().deleted);
+    assert!(b.index().get("foo.txt").unwrap().unwrap().deleted);
+}
+
+#[test]
 fn chunking_dedups_and_deltas() {
     use codrop_sync_engine::BlobStore;
     let tmp = tempfile::tempdir().unwrap();

@@ -143,6 +143,16 @@ impl BlobStore {
         self.put_bytes(&bytes)
     }
 
+    /// Verify that the content stored under `full_hash` actually reassembles to that hash. A
+    /// peer's manifest could list individually-valid chunks that concatenate to something else,
+    /// so this must be checked before trusting freshly-fetched content.
+    pub fn verify_content(&self, full_hash: &str) -> Result<bool> {
+        Ok(match self.read(full_hash)? {
+            Some(bytes) => blake3::hash(&bytes).to_hex().to_string() == full_hash,
+            None => false,
+        })
+    }
+
     /// Reassemble full content from its chunks, if we have all of them.
     pub fn read(&self, full_hash: &str) -> Result<Option<Vec<u8>>> {
         let Some(chunks) = self.get_manifest(full_hash)? else {

@@ -172,6 +172,9 @@ impl Engine {
     /// both pulls and live pushes. For non-tombstones, the record's content (manifest + chunks)
     /// must already be in the store — the transport fetches any missing chunks first.
     pub fn apply_incoming(&self, remote: &FileRecord) -> Result<ApplyOutcome> {
+        // Trust boundary: a peer's path must stay inside the synced tree. Reject absolute paths,
+        // `..`, and drive prefixes before any of it reaches the filesystem (materialize/delete).
+        ensure_safe_rel(&remote.path)?;
         match self.evaluate(remote)? {
             SyncAction::Skip => Ok(ApplyOutcome::Skipped),
             SyncAction::Fetch => {
@@ -328,6 +331,20 @@ fn ensure_gitignore(root: &Path, entry: &str) -> Result<()> {
     content.push_str(entry);
     content.push('\n');
     std::fs::write(&path, content)?;
+    Ok(())
+}
+
+/// Reject a peer-supplied relative path that would escape the synced root — absolute paths,
+/// `..` traversal, or a drive/root prefix. Only plain path segments (and `.`) are allowed.
+fn ensure_safe_rel(rel: &str) -> Result<()> {
+    use std::path::Component;
+    anyhow::ensure!(!rel.is_empty(), "empty path from peer");
+    for comp in Path::new(rel).components() {
+        match comp {
+            Component::Normal(_) | Component::CurDir => {}
+            _ => anyhow::bail!("unsafe path from peer: {rel:?}"),
+        }
+    }
     Ok(())
 }
 
