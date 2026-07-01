@@ -19,15 +19,7 @@ use std::{
 /// Directory names that are OS-compiled/regenerable or our own state — never synced (req 3).
 /// `.codrop` holds the index + blob store; ignoring it prevents the engine's own writes from
 /// echoing back as watch events.
-const IGNORE_DIRS: &[&str] = &[
-    ".codrop",
-    "node_modules",
-    ".git",
-    "target",
-    "dist",
-    ".next",
-    "build",
-];
+use codrop_sync_engine::IGNORE_DIRS;
 
 /// Lockfiles whose change should drive a (future, sandboxed) install. We key off lockfiles
 /// rather than package.json so installs run against a fully-resolved dependency set.

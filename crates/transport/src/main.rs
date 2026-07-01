@@ -11,7 +11,7 @@ use iroh::EndpointId;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-const IGNORE: &[&str] = &[".codrop", "node_modules", ".git", "target", "dist", "build"];
+use codrop_sync_engine::IGNORE_DIRS as IGNORE;
 
 #[tokio::main]
 async fn main() -> Result<()> {

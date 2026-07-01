@@ -9,6 +9,19 @@ pub mod index;
 pub mod store;
 pub mod vclock;
 
+/// Directory names Codrop never syncs — OS/toolchain-specific or Codrop's own state. Defined
+/// once here so every entry point (daemon, watcher, one-shot CLI) shares one ignore policy
+/// instead of drifting apart.
+pub const IGNORE_DIRS: &[&str] = &[
+    ".codrop",
+    "node_modules",
+    ".git",
+    "target",
+    "dist",
+    "build",
+    ".next",
+];
+
 pub use engine::{ignore_state_in_git, ApplyOutcome, Engine, Observation, SyncAction};
 pub use index::{FileRecord, Index};
 pub use store::BlobStore;
