@@ -103,6 +103,13 @@ impl Index {
         Ok(())
     }
 
+    /// Count live (non-tombstone) files without loading every row — for cheap status polling.
+    pub fn count_live(&self) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM files WHERE deleted=0", [], |r| r.get(0))?;
+        Ok(n as usize)
+    }
+
     pub fn all(&self) -> Result<Vec<FileRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn

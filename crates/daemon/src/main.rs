@@ -264,10 +264,7 @@ async fn snapshot_status(endpoint: &Endpoint, engine: &Engine, peers: &PeerSet) 
         .collect();
     drop(set);
 
-    let files = engine
-        .local_records()
-        .map(|r| r.iter().filter(|x| !x.deleted).count())
-        .unwrap_or(0);
+    let files = engine.file_count().unwrap_or(0);
 
     Status {
         pid: std::process::id(),
@@ -469,7 +466,9 @@ fn spawn_accept_loop(
                     }
                     println!("peer connected: {}", id.fmt_short());
                     peers.lock().await.push(conn.clone());
-                    let _ = net::serve_connection(engine, conn).await;
+                    if let Err(e) = net::serve_connection(engine, conn).await {
+                        eprintln!("serve error ({}): {e}", id.fmt_short());
+                    }
                 }
             });
         }
@@ -496,7 +495,9 @@ fn spawn_peer_link(endpoint: Endpoint, engine: Arc<Engine>, peers: PeerSet, peer
                         let engine = engine.clone();
                         let conn = conn.clone();
                         tokio::spawn(async move {
-                            let _ = net::serve_connection(engine, conn).await;
+                            if let Err(e) = net::serve_connection(engine, conn).await {
+                                eprintln!("serve error ({}): {e}", peer.fmt_short());
+                            }
                         });
                     }
                     match net::pull_over(&engine, &conn).await {

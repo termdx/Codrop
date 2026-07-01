@@ -89,7 +89,9 @@ pub fn serve_on(engine: Arc<Engine>, endpoint: &Endpoint) {
                 if let Ok(conn) = incoming.await {
                     let peer = conn.remote_id();
                     eprintln!("peer connected: {}", peer.fmt_short());
-                    let _ = serve_connection(engine, conn).await;
+                    if let Err(e) = serve_connection(engine, conn).await {
+                        eprintln!("serve error ({}): {e}", peer.fmt_short());
+                    }
                 }
             });
         }
@@ -109,7 +111,9 @@ pub async fn serve_connection(engine: Arc<Engine>, conn: Connection) -> Result<(
         let engine = engine.clone();
         let conn = conn.clone();
         tokio::spawn(async move {
-            let _ = handle_stream(engine, conn, send, recv).await;
+            if let Err(e) = handle_stream(engine, conn, send, recv).await {
+                eprintln!("stream error: {e}");
+            }
         });
     }
     Ok(())

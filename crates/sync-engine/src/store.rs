@@ -17,6 +17,10 @@ use anyhow::{anyhow, Context, Result};
 use fastcdc::v2020::FastCDC;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Monotonic counter making materialize temp filenames unique per call.
+static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 // Content-defined chunking targets (bytes): most source files land in a single chunk; large
 // files split so an edit only rewrites nearby chunks.
@@ -176,7 +180,11 @@ impl BlobStore {
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent)?;
         }
-        let tmp = dest.with_extension("codrop-tmp");
+        // Unique temp per file+call: `with_extension` would map foo.txt and foo.md to the same
+        // foo.codrop-tmp and clobber under concurrent materialize.
+        let name = dest.file_name().and_then(|n| n.to_str()).unwrap_or("codrop");
+        let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp = dest.with_file_name(format!(".{name}.{seq}.codrop-tmp"));
         fs::write(&tmp, &bytes)?;
         fs::rename(&tmp, dest)?;
         Ok(())

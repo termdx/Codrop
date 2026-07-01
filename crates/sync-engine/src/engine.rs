@@ -54,6 +54,10 @@ pub struct Engine {
     store: BlobStore,
     index: Index,
     device_id: String,
+    /// Serializes the evaluate→apply critical section so concurrent applies of the same path
+    /// (streams are handled in parallel) can't race into a spurious conflict. `apply_incoming`
+    /// is fully synchronous, so this is only ever held briefly and never across network I/O.
+    apply_lock: std::sync::Mutex<()>,
 }
 
 impl Engine {
@@ -74,6 +78,7 @@ impl Engine {
             store,
             index,
             device_id,
+            apply_lock: std::sync::Mutex::new(()),
         })
     }
 
@@ -132,6 +137,11 @@ impl Engine {
         self.index.all()
     }
 
+    /// Number of live (non-deleted) files, counted cheaply (no full-row load).
+    pub fn file_count(&self) -> Result<usize> {
+        self.index.count_live()
+    }
+
     /// Decide what to do with a peer's record, purely from vector clocks (no wall-clock).
     pub fn evaluate(&self, remote: &FileRecord) -> Result<SyncAction> {
         match self.index.get(&remote.path)? {
@@ -175,6 +185,8 @@ impl Engine {
         // Trust boundary: a peer's path must stay inside the synced tree. Reject absolute paths,
         // `..`, and drive prefixes before any of it reaches the filesystem (materialize/delete).
         ensure_safe_rel(&remote.path)?;
+        // Serialize the evaluate→apply sequence against concurrent applies (parallel streams).
+        let _apply = self.apply_lock.lock().unwrap();
         match self.evaluate(remote)? {
             SyncAction::Skip => Ok(ApplyOutcome::Skipped),
             SyncAction::Fetch => {
