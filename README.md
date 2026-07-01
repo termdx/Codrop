@@ -56,26 +56,29 @@ Or skip installing and just run in place: `./target/release/codrop --help`.
 ```
 codrop run <dir> [--peer <endpoint-id>] [--detach]   watch <dir> and sync it with a peer
 codrop id     <dir>                                  print <dir>'s stable endpoint id
+codrop trust  <dir> <endpoint-id>                    allow a peer to connect
 codrop status <dir>                                  show connected peers + sync state
 codrop stop   <dir>                                  stop the daemon for <dir>
 codrop --help | --version
 ```
 
-Run the daemon on each machine and point one at the other. A **single `--peer` gives
-bidirectional sync**.
+A daemon only talks to peers it **trusts**. `--peer <id>` dials *and* trusts that id; the
+other side has to trust you back (that's what `codrop trust` is for). Once trust is mutual, a
+single `--peer` drives sync both ways.
 
 ```bash
-# machine B — get its stable id, then start syncing ~/code
-codrop id ~/code            #  d951e2ed584d...   (also printed in the run banner)
+# machine B — print its id, and trust A (get A's id with `codrop id` on machine A)
+codrop id ~/code            #  <B-id>   (also printed in the run banner)
+codrop trust ~/code <A-id>
 codrop run ~/code
 
-# machine A — sync ~/code with machine B (one --peer syncs both ways)
-codrop run ~/code --peer d951e2ed584d...
+# machine A — dial + trust B in one step
+codrop run ~/code --peer <B-id>
 ```
 
 Now edits in `~/code` on either machine appear on the other within about a second. On connect,
 the two sides converge automatically (each receives the other's files); the `--peer` link
-reconnects on its own if the network drops.
+reconnects on its own if the network drops. Trust is remembered in `<dir>/.codrop/peers`.
 
 ### Run in the background
 
@@ -121,7 +124,9 @@ codrop-net pull  ~/projectB <id>      # pull projectA's files into projectB, onc
 - **Vector clocks** (not wall-clock time) order changes, so a newer edit is distinguishable
   from a concurrent one. Applying a change is idempotent (same content → no-op), which is what
   prevents sync echo loops.
-- On macOS, files are materialized with copy-on-write (`clonefile`); other platforms copy.
+- A daemon only accepts **trusted** peers, incoming content is verified against its hash, and
+  peer paths are constrained to the synced tree — so a rogue peer can't read, overwrite, or
+  escape your folder.
 
 ## Behavior & limitations
 
@@ -132,7 +137,8 @@ codrop-net pull  ~/projectB <id>      # pull projectA's files into projectB, onc
 - **Only changed data moves.** Files are split into content-defined chunks; a peer transfers
   just the chunks it's missing, so a small edit to a large file syncs a chunk or two, and
   identical content is deduplicated across files and versions.
-- `.env` and other secrets sync in **cleartext** — don't point Codrop at real secrets yet.
+- Transport is end-to-end encrypted by iroh, but blobs are stored **unencrypted at rest** under
+  `.codrop/` — so don't sync secrets to a device you don't control.
 
 ## Layout
 
