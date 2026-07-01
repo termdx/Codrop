@@ -5,13 +5,13 @@
 //! NATs, or relayed when neither works (e.g. the Wi-Fi AP-isolation case that blocked our raw
 //! QUIC transport). The endpoint key doubles as device identity — no skip-verify TLS.
 //!
-//! One connection carries both **pulls** (Index/Blob, for catch-up) and **pushes** (live
-//! changes). The sync protocol and the engine are unchanged; only the transport swapped.
+//! One connection carries pulls (Index) and pushes (change notifications); content moves as
+//! manifests + chunks (`Manifest`/`Chunk`), so only the chunks a peer is missing transfer.
 
 use crate::proto::{read_msg, write_msg, Req, Resp};
 use anyhow::{bail, Result};
 use codrop_sync_engine::{ApplyOutcome, Engine, FileRecord, SyncAction};
-use iroh::endpoint::{presets, Connection};
+use iroh::endpoint::{presets, Connection, RecvStream, SendStream};
 use iroh::{Endpoint, EndpointAddr, SecretKey};
 use std::path::Path;
 use std::sync::Arc;
@@ -96,35 +96,82 @@ pub fn serve_on(engine: Arc<Engine>, endpoint: &Endpoint) {
     });
 }
 
-/// Serve requests (Index/Blob/Push) on an established connection until the peer closes it.
+/// Serve requests on an established connection until the peer closes it. Each stream is handled
+/// in its own task, so a `Push` (which fetches chunks back over the same connection) can't block
+/// serving the peer's own chunk requests — otherwise two peers pushing at once would deadlock.
 /// Public so callers (the daemon) can run their own accept loop and register connections.
 pub async fn serve_connection(engine: Arc<Engine>, conn: Connection) -> Result<()> {
-    // One bidirectional stream per request; loop until the peer closes the connection.
     loop {
-        let (mut send, mut recv) = match conn.accept_bi().await {
+        let (send, recv) = match conn.accept_bi().await {
             Ok(streams) => streams,
             Err(_) => break, // peer closed — normal end of session
         };
-        let resp = match read_msg::<Req>(&mut recv).await? {
-            Req::Index => Resp::Index {
-                records: engine.local_records()?,
-            },
-            Req::Blob { hash } => match engine.store().read(&hash)? {
-                Some(bytes) => Resp::Blob { bytes },
-                None => Resp::NotFound,
-            },
-            Req::Push { record, bytes } => {
-                let outcome = engine.apply_incoming(&record, &bytes)?;
-                if outcome != ApplyOutcome::Skipped {
-                    eprintln!("push {}: {outcome:?}", record.path);
-                }
-                Resp::Ok
-            }
-        };
-        write_msg(&mut send, &resp).await?;
-        send.finish()?;
+        let engine = engine.clone();
+        let conn = conn.clone();
+        tokio::spawn(async move {
+            let _ = handle_stream(engine, conn, send, recv).await;
+        });
     }
     Ok(())
+}
+
+async fn handle_stream(
+    engine: Arc<Engine>,
+    conn: Connection,
+    mut send: SendStream,
+    mut recv: RecvStream,
+) -> Result<()> {
+    let resp = match read_msg::<Req>(&mut recv).await? {
+        Req::Index => Resp::Index {
+            records: engine.local_records()?,
+        },
+        Req::Manifest { hash } => match engine.store().get_manifest(&hash)? {
+            Some(chunks) => Resp::Manifest { chunks },
+            None => Resp::NotFound,
+        },
+        Req::Chunk { hash } => match engine.store().read_chunk(&hash)? {
+            Some(bytes) => Resp::Chunk { bytes },
+            None => Resp::NotFound,
+        },
+        Req::Push { record } => {
+            match fetch_and_apply(&engine, &conn, &record).await {
+                Ok(outcome) if outcome != ApplyOutcome::Skipped => {
+                    eprintln!("push {}: {outcome:?}", record.path)
+                }
+                Ok(_) => {}
+                Err(e) => eprintln!("push {} failed: {e}", record.path),
+            }
+            Resp::Ok
+        }
+    };
+    write_msg(&mut send, &resp).await?;
+    send.finish()?;
+    Ok(())
+}
+
+/// Ensure a record's content is in the local store — fetching only the chunks we're missing over
+/// `conn` — then apply it. Tombstones and content we already have (dedup) skip transfer entirely.
+async fn fetch_and_apply(
+    engine: &Engine,
+    conn: &Connection,
+    record: &FileRecord,
+) -> Result<ApplyOutcome> {
+    if !record.deleted && !engine.store().has(&record.hash) {
+        let chunks = match request(conn, &Req::Manifest { hash: record.hash.clone() }).await? {
+            Resp::Manifest { chunks } => chunks,
+            _ => bail!("peer has no manifest for {}", record.path),
+        };
+        for ch in &chunks {
+            if !engine.store().has_chunk(ch) {
+                match request(conn, &Req::Chunk { hash: ch.clone() }).await? {
+                    Resp::Chunk { bytes } => engine.store().put_chunk(ch, &bytes)?,
+                    _ => bail!("peer is missing chunk {ch} for {}", record.path),
+                }
+            }
+        }
+        engine.store().put_manifest(&record.hash, &chunks)?;
+    }
+    engine.apply_incoming(record)
 }
 
 /// Open a connection to `peer` on an existing endpoint (reused for pulls and pushes).
@@ -132,13 +179,10 @@ pub async fn connect(endpoint: &Endpoint, peer: impl Into<EndpointAddr>) -> Resu
     Ok(endpoint.connect(peer, ALPN).await?)
 }
 
-/// Push one changed file to a peer over an existing connection (live sync).
-pub async fn push(conn: &Connection, record: &FileRecord, bytes: &[u8]) -> Result<()> {
-    let req = Req::Push {
-        record: record.clone(),
-        bytes: bytes.to_vec(),
-    };
-    match request(conn, &req).await? {
+/// Notify a peer of a changed record over an existing connection (live sync). The peer pulls
+/// any chunks it's missing and applies it; we return once it acks.
+pub async fn push(conn: &Connection, record: &FileRecord) -> Result<()> {
+    match request(conn, &Req::Push { record: record.clone() }).await? {
         Resp::Ok => Ok(()),
         _ => bail!("unexpected response to Push"),
     }
@@ -177,24 +221,11 @@ pub async fn pull_over(engine: &Engine, conn: &Connection) -> Result<SyncStats> 
     };
 
     for rec in &records {
-        // Fast-skip what we already have/supersede; otherwise fetch content (unless it's a
-        // tombstone) and apply with full conflict handling.
-        if engine.evaluate(rec)? == SyncAction::Skip {
-            stats.skipped += 1;
-            continue;
+        // Fast-skip what we already have/supersede; otherwise fetch missing chunks and apply.
+        match engine.evaluate(rec)? {
+            SyncAction::Skip => stats.skipped += 1,
+            _ => tally(&mut stats, fetch_and_apply(engine, conn, rec).await?, &rec.path),
         }
-        let bytes = if rec.deleted {
-            Vec::new()
-        } else {
-            match request(conn, &Req::Blob { hash: rec.hash.clone() }).await? {
-                Resp::Blob { bytes } => bytes,
-                _ => {
-                    eprintln!("peer is missing blob {} for {}", rec.hash, rec.path);
-                    continue;
-                }
-            }
-        };
-        tally(&mut stats, engine.apply_incoming(rec, &bytes)?, &rec.path);
     }
     Ok(stats)
 }

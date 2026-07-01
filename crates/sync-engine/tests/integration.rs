@@ -81,22 +81,23 @@ fn delete_propagates_as_tombstone() {
     let (a, a_root) = engine_at(&tmp, "A");
     let (b, b_root) = engine_at(&tmp, "B");
 
-    // A creates foo.txt; B receives it.
+    // A creates foo.txt; B receives it (the transport would deliver content into B's store).
     fs::write(a_root.join("foo.txt"), b"hi").unwrap();
     let (rec, bytes) = record_of(&a, &a_root, "foo.txt");
-    assert_eq!(b.apply_incoming(&rec, &bytes).unwrap(), ApplyOutcome::Applied);
+    b.store().put_bytes(&bytes).unwrap();
+    assert_eq!(b.apply_incoming(&rec).unwrap(), ApplyOutcome::Applied);
     assert!(b_root.join("foo.txt").exists());
 
     // A deletes it → tombstone; B applies the tombstone → file removed, row marked deleted.
     fs::remove_file(a_root.join("foo.txt")).unwrap();
     let tomb = a.observe_delete(&a_root.join("foo.txt")).unwrap().unwrap();
     assert!(tomb.deleted);
-    assert_eq!(b.apply_incoming(&tomb, &[]).unwrap(), ApplyOutcome::Applied);
+    assert_eq!(b.apply_incoming(&tomb).unwrap(), ApplyOutcome::Applied);
     assert!(!b_root.join("foo.txt").exists());
     assert!(b.index().get("foo.txt").unwrap().unwrap().deleted);
 
     // Re-applying the tombstone is a no-op.
-    assert_eq!(b.apply_incoming(&tomb, &[]).unwrap(), ApplyOutcome::Skipped);
+    assert_eq!(b.apply_incoming(&tomb).unwrap(), ApplyOutcome::Skipped);
 }
 
 #[test]
@@ -111,9 +112,13 @@ fn concurrent_edits_keep_both() {
     fs::write(b_root.join("foo.txt"), b"BBB").unwrap();
     let (brec, bbytes) = record_of(&b, &b_root, "foo.txt");
 
+    // The transport would deliver the other side's content into each store before applying.
+    a.store().put_bytes(&bbytes).unwrap();
+    b.store().put_bytes(&abytes).unwrap();
+
     // Each applies the other's version → conflict, kept both.
-    let out_a = a.apply_incoming(&brec, &bbytes).unwrap();
-    let out_b = b.apply_incoming(&arec, &abytes).unwrap();
+    let out_a = a.apply_incoming(&brec).unwrap();
+    let out_b = b.apply_incoming(&arec).unwrap();
     assert!(matches!(out_a, ApplyOutcome::Conflicted { .. }));
     assert!(matches!(out_b, ApplyOutcome::Conflicted { .. }));
 
@@ -147,7 +152,7 @@ fn concurrent_edits_keep_both() {
     }
 
     // Re-applying converges (identical content → Skip, no new conflict).
-    assert_eq!(a.apply_incoming(&brec, &bbytes).unwrap(), ApplyOutcome::Skipped);
+    assert_eq!(a.apply_incoming(&brec).unwrap(), ApplyOutcome::Skipped);
 }
 
 #[test]

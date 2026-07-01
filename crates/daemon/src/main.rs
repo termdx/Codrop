@@ -377,14 +377,13 @@ async fn run(args: &[String]) -> Result<()> {
             }
             println!("changed: {} ({})", obs.path, &obs.hash[..12]);
             let Some(rec) = engine.index().get(&obs.path)? else { continue };
-            let Some(bytes) = engine.store().read(&obs.hash)? else { continue };
-            broadcast(&peers, &rec, &bytes).await;
+            broadcast(&peers, &rec).await;
         } else if !path.exists() {
-            // Possible deletion of a tracked file → tombstone + propagate (empty content).
+            // Possible deletion of a tracked file → tombstone + propagate.
             match engine.observe_delete(&path) {
                 Ok(Some(tomb)) => {
                     println!("deleted: {}", tomb.path);
-                    broadcast(&peers, &tomb, &[]).await;
+                    broadcast(&peers, &tomb).await;
                 }
                 Ok(None) => {} // not a tracked live file (dir, temp, already gone)
                 Err(e) => eprintln!("observe_delete {}: {e}", path.display()),
@@ -444,12 +443,13 @@ fn spawn_peer_link(endpoint: Endpoint, engine: Arc<Engine>, peers: PeerSet, peer
     });
 }
 
-/// Push a change to every live peer connection; prune any that have closed.
-async fn broadcast(peers: &PeerSet, rec: &FileRecord, bytes: &[u8]) {
+/// Notify every live peer of a changed record; prune any connections that have closed. The
+/// peer pulls only the chunks it's missing.
+async fn broadcast(peers: &PeerSet, rec: &FileRecord) {
     let conns: Vec<Connection> = peers.lock().await.clone();
     let mut pushed = 0;
     for conn in &conns {
-        match net::push(conn, rec, bytes).await {
+        match net::push(conn, rec).await {
             Ok(()) => pushed += 1,
             Err(e) => eprintln!("  push to {} failed: {e}", conn.remote_id().fmt_short()),
         }
@@ -460,17 +460,11 @@ async fn broadcast(peers: &PeerSet, rec: &FileRecord, bytes: &[u8]) {
     }
 }
 
-/// Push every locally-indexed file to a peer (initial convergence). No-op for content the peer
-/// already has.
+/// Notify a peer of every locally-indexed record (initial convergence). The peer pulls only the
+/// chunks it lacks, and skips content it already has.
 async fn push_all(engine: &Engine, conn: &Connection) -> Result<()> {
     for rec in engine.local_records()? {
-        // Tombstones carry no blob; everything else ships its content.
-        let bytes = if rec.deleted {
-            Vec::new()
-        } else {
-            engine.store().read(&rec.hash)?.unwrap_or_default()
-        };
-        net::push(conn, &rec, &bytes).await?;
+        net::push(conn, &rec).await?;
     }
     Ok(())
 }

@@ -2,7 +2,7 @@
 //! connecting by direct address — no relay/discovery/internet needed).
 
 use codrop_sync_engine::Engine;
-use codrop_transport::{connect, pull_on, push, serve_on, ALPN};
+use codrop_transport::{connect, pull_on, push, serve_connection, serve_on, ALPN};
 use iroh::endpoint::presets;
 use iroh::{Endpoint, EndpointAddr, TransportAddr};
 use std::fs;
@@ -78,7 +78,15 @@ async fn peer_pull_converges_over_iroh() {
 async fn live_push_applies_on_peer() {
     let tmp = tempfile::tempdir().unwrap();
 
-    // Receiver B serves (handles incoming pushes).
+    // Sender A creates a file and indexes it (its content lands in A's store).
+    let a_root = tmp.path().join("A");
+    fs::create_dir_all(&a_root).unwrap();
+    let a = Arc::new(Engine::open(&a_root, a_root.join(".codrop")).unwrap());
+    fs::write(a_root.join("live.rs"), b"// edited live").unwrap();
+    a.observe(&a_root.join("live.rs")).unwrap();
+    let rec = a.index().get("live.rs").unwrap().unwrap();
+
+    // Receiver B serves (accepts A's connection; on push it pulls the chunks back from A).
     let b_root = tmp.path().join("B");
     fs::create_dir_all(&b_root).unwrap();
     let b = Engine::open(&b_root, b_root.join(".codrop")).unwrap();
@@ -86,19 +94,13 @@ async fn live_push_applies_on_peer() {
     let b_addr = addr_of(&b_ep);
     serve_on(Arc::new(b), &b_ep);
 
-    // Sender A creates a file, indexes it, and pushes it to B.
-    let a_root = tmp.path().join("A");
-    fs::create_dir_all(&a_root).unwrap();
-    let a = Engine::open(&a_root, a_root.join(".codrop")).unwrap();
-    fs::write(a_root.join("live.rs"), b"// edited live").unwrap();
-    let obs = a.observe(&a_root.join("live.rs")).unwrap();
-    let rec = a.index().get("live.rs").unwrap().unwrap();
-    let bytes = a.store().read(&obs.hash).unwrap().unwrap();
-
+    // A connects and must ALSO serve its side, so B can fetch the file's chunks over the same
+    // connection when it handles the push.
     let a_ep = loopback_endpoint().await;
     let conn = connect(&a_ep, b_addr).await.unwrap();
-    push(&conn, &rec, &bytes).await.unwrap();
+    tokio::spawn(serve_connection(a.clone(), conn.clone()));
+    push(&conn, &rec).await.unwrap();
 
-    // apply_remote runs before the Ok ack, so by the time push() returns the file exists.
+    // push() returns only after B fetched the chunks + applied, so the file exists now.
     assert_eq!(fs::read(b_root.join("live.rs")).unwrap(), b"// edited live");
 }

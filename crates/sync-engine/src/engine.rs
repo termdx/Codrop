@@ -168,23 +168,24 @@ impl Engine {
         }
     }
 
-    /// Apply an incoming peer record (+content) with full conflict handling. The single entry
-    /// point for both pulls and live pushes. For tombstones, `bytes` is empty.
-    pub fn apply_incoming(&self, remote: &FileRecord, bytes: &[u8]) -> Result<ApplyOutcome> {
+    /// Apply an incoming peer record with full conflict handling. The single entry point for
+    /// both pulls and live pushes. For non-tombstones, the record's content (manifest + chunks)
+    /// must already be in the store — the transport fetches any missing chunks first.
+    pub fn apply_incoming(&self, remote: &FileRecord) -> Result<ApplyOutcome> {
         match self.evaluate(remote)? {
             SyncAction::Skip => Ok(ApplyOutcome::Skipped),
             SyncAction::Fetch => {
-                self.apply_remote(remote, bytes)?;
+                self.apply_remote(remote)?;
                 Ok(ApplyOutcome::Applied)
             }
-            SyncAction::Conflict => self.resolve_conflict(remote, bytes),
+            SyncAction::Conflict => self.resolve_conflict(remote),
         }
     }
 
-    /// Apply a record that causally supersedes ours: delete (tombstone) or materialize, then
-    /// record the merged clock. The watcher's later `observe()` is a no-op (content-addressed),
-    /// which suppresses echo loops.
-    pub fn apply_remote(&self, remote: &FileRecord, bytes: &[u8]) -> Result<()> {
+    /// Apply a record that causally supersedes ours: delete (tombstone) or materialize from the
+    /// store, then record the merged clock. The watcher's later `observe()` is a no-op
+    /// (content-addressed), which suppresses echo loops.
+    pub fn apply_remote(&self, remote: &FileRecord) -> Result<()> {
         let mut vclock = remote.vclock.clone();
         if let Some(local) = self.index.get(&remote.path)? {
             vclock.merge(&local.vclock); // dominate both sides
@@ -206,18 +207,17 @@ impl Engine {
             return Ok(());
         }
 
-        let hash = self.store.put_bytes(bytes)?;
         anyhow::ensure!(
-            hash == remote.hash,
-            "blob hash mismatch for {} (got {hash}, expected {})",
+            self.store.has(&remote.hash),
+            "content for {} ({}) not in store",
             remote.path,
             remote.hash
         );
-        self.store.materialize(&hash, &abs)?;
+        self.store.materialize(&remote.hash, &abs)?;
         self.index.upsert(&FileRecord {
             path: remote.path.clone(),
-            hash,
-            size: bytes.len() as u64,
+            hash: remote.hash.clone(),
+            size: remote.size,
             vclock,
             updated_ms: now_ms(),
             deleted: false,
@@ -227,13 +227,13 @@ impl Engine {
 
     /// Resolve a concurrent change. Delete-vs-edit: the edit wins (no data lost). Edit-vs-edit:
     /// keep both — one content wins the path (deterministically, by greater hash), the other is
-    /// written to a `<name> (conflict <hash>)` copy. Both peers compute the same outcome, so
-    /// they converge without duplicating.
-    fn resolve_conflict(&self, remote: &FileRecord, bytes: &[u8]) -> Result<ApplyOutcome> {
+    /// preserved under `.codrop/conflicts/<path>`. Both peers compute the same outcome, so they
+    /// converge without duplicating. Both versions' content must already be in the store.
+    fn resolve_conflict(&self, remote: &FileRecord) -> Result<ApplyOutcome> {
         let local = match self.index.get(&remote.path)? {
             Some(l) => l,
             None => {
-                self.apply_remote(remote, bytes)?;
+                self.apply_remote(remote)?;
                 return Ok(ApplyOutcome::Applied);
             }
         };
@@ -252,7 +252,7 @@ impl Engine {
                 return Ok(ApplyOutcome::ConflictKeptLocal);
             }
             // their edit resurrects the file over our delete.
-            self.apply_remote(remote, bytes)?;
+            self.apply_remote(remote)?;
             return Ok(ApplyOutcome::Applied);
         }
 
@@ -266,25 +266,20 @@ impl Engine {
             return Ok(ApplyOutcome::Skipped);
         }
 
-        // both edits, different content → keep both. The winner keeps the canonical path; the
-        // loser is preserved under <state>/conflicts/<path> (same structure & name), outside the
-        // synced tree. It's not indexed, so it neither clutters the tree nor propagates — each
-        // peer independently saves its own losing copy for manual recovery.
-        let remote_hash = self.store.put_bytes(bytes)?;
+        // both edits, different content → keep both.
         anyhow::ensure!(
-            remote_hash == remote.hash,
-            "blob hash mismatch in conflict for {}",
+            self.store.has(&remote.hash),
+            "conflict content for {} not in store",
             remote.path
         );
-        let (winner, loser) = if remote.hash > local.hash {
-            (remote.hash.clone(), local.hash.clone())
+        let (winner, winner_size, loser) = if remote.hash > local.hash {
+            (remote.hash.clone(), remote.size, local.hash.clone())
         } else {
-            (local.hash.clone(), remote.hash.clone())
+            (local.hash.clone(), local.size, remote.hash.clone())
         };
 
         // winner takes the canonical path with the merged clock.
         self.store.materialize(&winner, &self.root.join(&remote.path))?;
-        let winner_size = self.store.read(&winner)?.map(|b| b.len()).unwrap_or(0) as u64;
         self.index.upsert(&FileRecord {
             path: remote.path.clone(),
             hash: winner,
@@ -294,7 +289,7 @@ impl Engine {
             deleted: false,
         })?;
 
-        // loser → .codrop/conflicts/<path>, preserving folder structure and name.
+        // loser → .codrop/conflicts/<path> (not indexed), preserving folder structure and name.
         let conflict_path = self.conflicts_dir.join(&remote.path);
         self.store.materialize(&loser, &conflict_path)?;
 

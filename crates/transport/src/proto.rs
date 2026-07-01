@@ -6,24 +6,27 @@
 use codrop_sync_engine::FileRecord;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
-/// One peer -> another. The same connection carries pulls (Index/Blob) and live pushes.
+/// One peer -> another. Content moves as manifests + chunks, so only missing chunks transfer.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Req {
     /// "Send me your whole index."
     Index,
-    /// "Send me the bytes for this content hash."
-    Blob { hash: String },
-    /// "Here is a changed file — apply it if it supersedes yours." (live sync)
-    Push { record: FileRecord, bytes: Vec<u8> },
+    /// "Send me the chunk manifest for this full-content hash."
+    Manifest { hash: String },
+    /// "Send me the bytes for this chunk hash."
+    Chunk { hash: String },
+    /// "I have a new version of this path — pull the chunks you're missing and apply it."
+    Push { record: FileRecord },
 }
 
 /// Response to a `Req`.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Resp {
     Index { records: Vec<FileRecord> },
-    Blob { bytes: Vec<u8> },
+    Manifest { chunks: Vec<String> },
+    Chunk { bytes: Vec<u8> },
     NotFound,
-    /// Acknowledges a `Push`.
+    /// Acknowledges a `Push` (sent after the pushed change has been fetched + applied).
     Ok,
 }
 
