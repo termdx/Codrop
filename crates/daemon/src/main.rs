@@ -24,6 +24,7 @@ use notify::{RecursiveMode, Watcher};
 use notify_debouncer_full::new_debouncer;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -89,7 +90,33 @@ const BANNER: &str = r#"
 ░                  ░"#;
 
 fn banner() {
-    println!("{BANNER}");
+    // Only colorize on a real terminal — keep pipes and the detached daemon.log clean.
+    if std::io::stdout().is_terminal() {
+        const TEAL: &str = "\x1b[38;2;26;188;156m"; // solid letter blocks
+        const LIGHT_TEAL: &str = "\x1b[38;2;130;220;205m"; // drop shadow
+        const RESET: &str = "\x1b[0m";
+        let color_of = |c: char| match c {
+            '█' | '▓' | '▄' | '▀' | '▌' | '▐' => Some(TEAL),
+            '▒' | '░' => Some(LIGHT_TEAL),
+            _ => None,
+        };
+        let mut out = String::new();
+        let mut cur: Option<&str> = None;
+        for ch in BANNER.chars() {
+            let want = color_of(ch);
+            if want != cur {
+                out.push_str(want.unwrap_or(RESET));
+                cur = want;
+            }
+            out.push(ch);
+        }
+        if cur.is_some() {
+            out.push_str(RESET);
+        }
+        println!("{out}");
+    } else {
+        println!("{BANNER}");
+    }
     println!("  live folder sync across your machines · v{}\n", env!("CARGO_PKG_VERSION"));
 }
 
