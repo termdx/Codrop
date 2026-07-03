@@ -75,10 +75,29 @@ async fn main() -> Result<()> {
     }
 }
 
+/// ASCII wordmark shown on `run` and `--help`.
+const BANNER: &str = r#"
+ ▄████▄   ▒█████  ▓█████▄  ██▀███   ▒█████   ██▓███
+▒██▀ ▀█  ▒██▒  ██▒▒██▀ ██▌▓██ ▒ ██▒▒██▒  ██▒▓██░  ██▒
+▒▓█    ▄ ▒██░  ██▒░██   █▌▓██ ░▄█ ▒▒██░  ██▒▓██░ ██▓▒
+▒▓▓▄ ▄██▒▒██   ██░░▓█▄   ▌▒██▀▀█▄  ▒██   ██░▒██▄█▓▒ ▒
+▒ ▓███▀ ░░ ████▓▒░░▒████▓ ░██▓ ▒██▒░ ████▓▒░▒██▒ ░  ░
+░ ░▒ ▒  ░░ ▒░▒░▒░  ▒▒▓  ▒ ░ ▒▓ ░▒▓░░ ▒░▒░▒░ ▒▓▒░ ░  ░
+  ░  ▒     ░ ▒ ▒░  ░ ▒  ▒   ░▒ ░ ▒░  ░ ▒ ▒░ ░▒ ░
+░        ░ ░ ░ ▒   ░ ░  ░   ░░   ░ ░ ░ ░ ▒  ░░
+░ ░          ░ ░     ░       ░         ░ ░
+░                  ░"#;
+
+fn banner() {
+    println!("{BANNER}");
+    println!("  live folder sync across your machines · v{}\n", env!("CARGO_PKG_VERSION"));
+}
+
 fn print_help() {
+    banner();
     print!(
         "\
-codrop — a Dropbox for devs: live folder sync across your machines, over iroh.
+A Dropbox for devs: zero-effort sync across your machines, over iroh.
 
 USAGE:
     codrop run <dir> [--peer <endpoint-id>] [--detach]
@@ -350,6 +369,7 @@ async fn run(args: &[String]) -> Result<()> {
         return detach(args);
     }
 
+    banner();
     let dir = PathBuf::from(args.get(2).ok_or_else(|| anyhow!("usage: codrop run <dir> [--peer <id>]"))?);
     std::fs::create_dir_all(&dir)?;
     let root = dir.canonicalize()?;
