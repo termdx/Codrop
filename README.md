@@ -9,6 +9,23 @@ over an encrypted peer-to-peer connection. Devices are identified and authentica
 key — you never deal with IP addresses, and it works across LAN, NAT, and restrictive Wi-Fi
 (direct when possible, relayed when the network won't allow direct).
 
+## How is this different from Git?
+
+**Short answer:** Git records commits. Codrop mirrors your working folder in real time.
+
+| | Git | Codrop |
+|---|---|---|
+| **Primary goal** | Version history & collaboration | Live sync of current state across devices |
+| **Granularity** | Commit-level snapshots | Byte-level, content-addressed chunks |
+| **Conflict model** | Manual merge commits | Vector-clock ordering; conflicts preserved automatically under `.codrop/conflicts/` |
+| **Transports** | Central server or fetch/push | Encrypted peer-to-peer over QUIC (iroh), direct → hole-punch → relayed |
+| **Auth model** | SSH keys / HTTPS tokens | Ed25519 public keys; peers addressed by key, never IP |
+| **Use case fit** | Shipping code, PRs, release history | "I'm on my laptop, now I'm on desktop — where's my WIP?" |
+
+Git and Codrop solve different problems. **Use both:** Git for commits, PRs, and history. Codrop for the *uncommitted stuff* between commits — the `.env`s, the half-written features, the state you'd otherwise shuttle around with `git stash`, USB sticks, or desperate Slack file drops.
+
+> Codrop is not "git but faster." It is "stop using git to sync uncommitted work across machines."
+
 ## Build & install
 
 There's no hosted package yet, so build from source. Requires **Rust ≥ 1.91** (install via
