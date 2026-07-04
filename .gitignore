@@ -11,3 +11,6 @@
 # Local secrets / env
 .env
 *.local
+
+# Local planning notes (not tracked)
+/specs/
