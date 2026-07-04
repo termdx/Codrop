@@ -54,31 +54,33 @@ Or skip installing and just run in place: `./target/release/codrop --help`.
 ## Usage — the `codrop` daemon
 
 ```
-codrop run <dir> [--peer <endpoint-id>] [--detach]   watch <dir> and sync it with a peer
+codrop run  <dir> [--peer <endpoint-id>] [--detach]  watch <dir> and sync with its paired peers
+codrop pair <dir> <endpoint-id>                      pair with a peer (trust it + dial it)
 codrop id     <dir>                                  print <dir>'s stable endpoint id
-codrop trust  <dir> <endpoint-id>                    allow a peer to connect
 codrop status <dir>                                  show connected peers + sync state
 codrop stop   <dir>                                  stop the daemon for <dir>
 codrop --help | --version
 ```
 
-A daemon only talks to peers it **trusts**. `--peer <id>` dials *and* trusts that id; the
-other side has to trust you back (that's what `codrop trust` is for). Once trust is mutual, a
-single `--peer` drives sync both ways.
+A daemon only talks to peers it's **paired** with. Pairing is mutual: run `codrop pair` on each
+side with the other's id, then just `codrop run`.
 
 ```bash
-# machine B — print its id, and trust A (get A's id with `codrop id` on machine A)
-codrop id ~/code            #  <B-id>   (also printed in the run banner)
-codrop trust ~/code <A-id>
-codrop run ~/code
+# on each machine: get its id
+codrop id ~/code            #  → the endpoint id (also printed in the run banner)
 
-# machine A — dial + trust B in one step
-codrop run ~/code --peer <B-id>
+# pair the two (run on BOTH, each with the OTHER's id), then run
+codrop pair ~/code <other-id>
+codrop run  ~/code
 ```
 
-Now edits in `~/code` on either machine appear on the other within about a second. On connect,
-the two sides converge automatically (each receives the other's files); the `--peer` link
-reconnects on its own if the network drops. Trust is remembered in `<dir>/.codrop/peers`.
+Now edits in `~/code` on either machine appear on the other within about a second — new files,
+changes, deletes. On connect the two sides converge automatically; the links reconnect on their
+own if the network drops. Pairings persist in `<dir>/.codrop/peers`.
+
+**More than two machines?** Pair every machine with every other one — `codrop run` dials all of
+them, forming a full mesh so a change on any node reaches all the others. (`--peer <id>` on `run`
+is a one-shot shortcut for "pair this id, then run".)
 
 ### Run in the background
 

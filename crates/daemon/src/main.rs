@@ -57,7 +57,7 @@ async fn main() -> Result<()> {
     match args.get(1).map(String::as_str) {
         Some("run") => run(&args).await,
         Some("id") => id_cmd(&args),
-        Some("trust") => trust_cmd(&args),
+        Some("pair") | Some("trust") => pair_cmd(&args),
         Some("status") => status_cmd(&args),
         Some("stop") => stop_cmd(&args),
         Some("--help") | Some("-h") | Some("help") | None => {
@@ -127,27 +127,29 @@ fn print_help() {
 A Dropbox for devs: zero-effort sync across your machines, over iroh.
 
 USAGE:
-    codrop run <dir> [--peer <endpoint-id>] [--detach]
-                                              Watch <dir> and sync it live with a peer
+    codrop run    <dir> [--peer <endpoint-id>] [--detach]
+                                              Watch <dir> and sync with its paired peers
                                               (--detach / -d runs it in the background)
-    codrop id     <dir>                       Print <dir>'s stable endpoint id
-    codrop trust  <dir> <endpoint-id>         Allow a peer to connect to <dir>'s daemon
-    codrop status <dir>                       Show daemon status: connected peers + sync state
-    codrop stop   <dir>                       Stop the daemon running for <dir>
+    codrop pair   <dir> <endpoint-id>         Pair <dir> with a peer (trust it + dial it)
+    codrop id     <dir>                        Print <dir>'s stable endpoint id
+    codrop status <dir>                        Daemon status: connected peers + sync state
+    codrop stop   <dir>                        Stop the daemon running for <dir>
     codrop --help                             Show this help
     codrop --version                          Show the version
 
 EXAMPLES:
-    # machine B: start syncing (its endpoint id prints in the banner)
-    codrop run ~/code
+    # on each machine: get its id
+    codrop id ~/code
 
-    # machine A: point at B's id — one --peer syncs both directions
-    codrop run ~/code --peer <B-endpoint-id>
+    # pair the two (run on BOTH, each with the other's id), then just run
+    codrop pair ~/code <other-endpoint-id>
+    codrop run  ~/code
 
 NOTES:
     • Peers connect by EndpointId (a public key) — no IP addresses; works across NAT/relay.
-    • A daemon only accepts peers it trusts: `--peer <id>` trusts that id; the other side must
-      `codrop trust <your-id>` (get yours with `codrop id`). Trust persists in .codrop/peers.
+    • Pairing is mutual: `codrop pair` on each side (or `run --peer <id>` as a one-shot shortcut).
+      A daemon only talks to peers it's paired with; pairings persist in <dir>/.codrop/peers.
+    • Pair every machine with every other for a full N-way mesh.
     • State lives in <dir>/.codrop, added to .gitignore automatically.
 "
     );
@@ -165,27 +167,29 @@ fn id_cmd(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Add an endpoint id to `<dir>`'s trusted-peers allowlist so its daemon will accept it.
-fn trust_cmd(args: &[String]) -> Result<()> {
-    let dir = PathBuf::from(args.get(2).ok_or_else(|| anyhow!("usage: codrop trust <dir> <id>"))?);
+/// Pair `<dir>` with a peer: remember its endpoint id so this daemon both trusts it (accepts its
+/// connections) and dials it on `run`. Do this on each side, then just `codrop run`.
+fn pair_cmd(args: &[String]) -> Result<()> {
+    let dir = PathBuf::from(args.get(2).ok_or_else(|| anyhow!("usage: codrop pair <dir> <id>"))?);
     let id: EndpointId = args
         .get(3)
-        .ok_or_else(|| anyhow!("usage: codrop trust <dir> <id>"))?
+        .ok_or_else(|| anyhow!("usage: codrop pair <dir> <id>"))?
         .parse()
         .map_err(|e| anyhow!("invalid endpoint id: {e}"))?;
     std::fs::create_dir_all(dir.join(".codrop"))?;
-    trust_peer(&dir, id)?;
-    println!("codrop: trusting {id} for {}", dir.display());
+    pair_peer(&dir, id)?;
+    println!("codrop: paired {} with {id}", dir.display());
+    println!("  run `codrop run {}` to start syncing", dir.display());
     Ok(())
 }
 
-/// The trusted-peers allowlist file.
+/// The paired-peers file: endpoint ids this daemon trusts and dials.
 fn peers_file(dir: &Path) -> PathBuf {
     dir.join(".codrop/peers")
 }
 
-/// Load the trusted endpoint ids for `<dir>` (unknown/garbage lines are ignored).
-fn load_trusted(dir: &Path) -> Vec<EndpointId> {
+/// Load the paired endpoint ids for `<dir>` (unknown/garbage lines are ignored).
+fn load_peers(dir: &Path) -> Vec<EndpointId> {
     std::fs::read_to_string(peers_file(dir))
         .unwrap_or_default()
         .lines()
@@ -193,14 +197,14 @@ fn load_trusted(dir: &Path) -> Vec<EndpointId> {
         .collect()
 }
 
-/// Add `id` to the trusted allowlist (idempotent, persisted).
-fn trust_peer(dir: &Path, id: EndpointId) -> Result<()> {
-    let mut trusted = load_trusted(dir);
-    if trusted.contains(&id) {
+/// Add `id` to the paired-peers file (idempotent, persisted).
+fn pair_peer(dir: &Path, id: EndpointId) -> Result<()> {
+    let mut peers = load_peers(dir);
+    if peers.contains(&id) {
         return Ok(());
     }
-    trusted.push(id);
-    let body: String = trusted.iter().map(|i| format!("{i}\n")).collect();
+    peers.push(id);
+    let body: String = peers.iter().map(|i| format!("{i}\n")).collect();
     if let Some(parent) = peers_file(dir).parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -401,21 +405,20 @@ async fn run(args: &[String]) -> Result<()> {
     std::fs::create_dir_all(&dir)?;
     let root = dir.canonicalize()?;
 
-    let peer: Option<EndpointId> = match args.iter().position(|a| a == "--peer") {
-        Some(i) => Some(
-            args.get(i + 1)
-                .ok_or_else(|| anyhow!("--peer needs an endpoint id"))?
-                .parse()
-                .map_err(|e| anyhow!("invalid endpoint id: {e}"))?,
-        ),
-        None => None,
-    };
-
-    // A dialed peer is implicitly trusted (and remembered); the accept loop rejects everyone else.
-    if let Some(p) = peer {
-        trust_peer(&dir, p)?;
+    // `--peer <id>` is shorthand for "pair this id, then run" — it's added to the peers file.
+    if let Some(i) = args.iter().position(|a| a == "--peer") {
+        let id: EndpointId = args
+            .get(i + 1)
+            .ok_or_else(|| anyhow!("--peer needs an endpoint id"))?
+            .parse()
+            .map_err(|e| anyhow!("invalid endpoint id: {e}"))?;
+        pair_peer(&dir, id)?;
     }
-    let trusted = Arc::new(load_trusted(&root));
+
+    // Paired peers: the accept loop trusts them, and we dial each of them (a full mesh forms
+    // when every device is paired with the others).
+    let paired = load_peers(&root);
+    let trusted = Arc::new(paired.clone());
 
     let engine = Arc::new(Engine::open(&root, root.join(".codrop"))?);
     let indexed = scan(&engine, &root)?;
@@ -424,16 +427,13 @@ async fn run(args: &[String]) -> Result<()> {
     let endpoint = net::endpoint_with_key(key).await?;
     println!("codrop: watching {} ({indexed} files)", root.display());
     println!("  endpoint id: {}", endpoint.id());
-    println!("  trusting {} peer(s)", trusted.len());
-    if let Some(p) = peer {
-        println!("  peer: {p}");
-    }
+    println!("  paired with {} peer(s)", paired.len());
 
     let peers: PeerSet = Arc::new(Mutex::new(Vec::new()));
 
     spawn_accept_loop(endpoint.clone(), engine.clone(), peers.clone(), trusted.clone());
-    if let Some(peer) = peer {
-        spawn_peer_link(endpoint.clone(), engine.clone(), peers.clone(), peer);
+    for &pid in &paired {
+        spawn_peer_link(endpoint.clone(), engine.clone(), peers.clone(), pid);
     }
     spawn_status_writer(root.join(".codrop"), endpoint.clone(), engine.clone(), peers.clone());
 
