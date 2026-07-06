@@ -73,6 +73,7 @@ Or skip installing and just run in place: `./target/release/codrop --help`.
 ```
 codrop run  <dir> [--peer <endpoint-id>] [--detach]  watch <dir> and sync with its paired peers
 codrop pair <dir> <endpoint-id>                      pair with a peer (trust it + dial it)
+codrop ignore <dir> <file|subdir|glob>               stop syncing matching paths (.codropignore)
 codrop id     <dir>                                  print <dir>'s stable endpoint id
 codrop status <dir>                                  show connected peers + sync state
 codrop stop   <dir>                                  stop the daemon for <dir>
@@ -119,7 +120,12 @@ codrop stop ~/code          # stop it
 - **Stable identity.** A device key lives in `<dir>/.codrop/endpoint.key`, so a device's id is
   the same across restarts. `codrop id <dir>` prints it without starting the daemon.
 - **Ignored by default:** `node_modules`, `.git`, `target`, `dist`, `build`, `.next` — the
-  OS/toolchain-specific directories you don't want to sync.
+  OS/toolchain-specific directories you don't want to sync. Add your own with
+  `codrop ignore <dir> <pattern>` or by editing `<dir>/.codropignore` (gitignore syntax:
+  `*.log`, `.venv/`, `__pycache__`, `!keep.log`). It's the escape hatch for secrets too —
+  `codrop ignore ~/code .env` keeps it local. Ignores are **sender-side** (they filter what a
+  machine sends) and propagate between peers as `.codropignore` itself syncs; a change to the
+  ignore file takes effect on the next `codrop run`.
 - **Git-friendly:** Codrop adds `.codrop/` to the folder's `.gitignore`, so its own state
   never lands in your commits.
 

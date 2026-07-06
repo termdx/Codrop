@@ -5,6 +5,7 @@
 //! This is what later phases (transport, conflict resolution, VFS) build on.
 
 pub mod engine;
+pub mod ignore;
 pub mod index;
 pub mod store;
 pub mod vclock;
@@ -23,6 +24,7 @@ pub const IGNORE_DIRS: &[&str] = &[
 ];
 
 pub use engine::{ignore_state_in_git, ApplyOutcome, Engine, Observation, SyncAction};
+pub use ignore::{append_ignore, normalize_pattern, Matcher, IGNORE_FILE};
 pub use index::{FileRecord, Index};
 pub use store::BlobStore;
 pub use vclock::{Causality, VClock};

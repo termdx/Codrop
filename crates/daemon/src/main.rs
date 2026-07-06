@@ -16,7 +16,7 @@
 //! of that write is a no-op (content-addressing).
 
 use anyhow::{anyhow, Result};
-use codrop_sync_engine::{Engine, FileRecord};
+use codrop_sync_engine::{Engine, FileRecord, Matcher};
 use codrop_transport as net;
 use iroh::endpoint::Connection;
 use iroh::{Endpoint, EndpointId};
@@ -46,8 +46,6 @@ struct PeerStatus {
     connected: bool,
 }
 
-use codrop_sync_engine::IGNORE_DIRS as IGNORE;
-
 /// Live connections to peers (inbound + the outbound `--peer` link).
 type PeerSet = Arc<Mutex<Vec<Connection>>>;
 
@@ -58,6 +56,7 @@ async fn main() -> Result<()> {
         Some("run") => run(&args).await,
         Some("id") => id_cmd(&args),
         Some("pair") | Some("trust") => pair_cmd(&args),
+        Some("ignore") => ignore_cmd(&args),
         Some("status") => status_cmd(&args),
         Some("stop") => stop_cmd(&args),
         Some("--help") | Some("-h") | Some("help") | None => {
@@ -131,6 +130,7 @@ USAGE:
                                               Watch <dir> and sync with its paired peers
                                               (--detach / -d runs it in the background)
     codrop pair   <dir> <endpoint-id>         Pair <dir> with a peer (trust it + dial it)
+    codrop ignore <dir> <file|subdir|glob>    Stop syncing matching paths (writes .codropignore)
     codrop id     <dir>                        Print <dir>'s stable endpoint id
     codrop status <dir>                        Daemon status: connected peers + sync state
     codrop stop   <dir>                        Stop the daemon running for <dir>
@@ -150,6 +150,9 @@ NOTES:
     • Pairing is mutual: `codrop pair` on each side (or `run --peer <id>` as a one-shot shortcut).
       A daemon only talks to peers it's paired with; pairings persist in <dir>/.codrop/peers.
     • Pair every machine with every other for a full N-way mesh.
+    • Ignores: node_modules/.git/target/dist/build/.next are skipped by default; add your own
+      with `codrop ignore <dir> <pattern>` (or edit <dir>/.codropignore, gitignore syntax).
+      Ignores are sender-side and sync between peers as .codropignore propagates.
     • State lives in <dir>/.codrop, added to .gitignore automatically.
 "
     );
@@ -180,6 +183,30 @@ fn pair_cmd(args: &[String]) -> Result<()> {
     pair_peer(&dir, id)?;
     println!("codrop: paired {} with {id}", dir.display());
     println!("  run `codrop run {}` to start syncing", dir.display());
+    Ok(())
+}
+
+/// Add a pattern to `<dir>/.codropignore` so Codrop stops syncing matching paths. Accepts a
+/// gitignore-style pattern (`*.log`, `.venv/`, `!keep.log`) or a file/subdir — a path under
+/// `<dir>` is stored root-relative. Takes effect on the next `codrop run`.
+fn ignore_cmd(args: &[String]) -> Result<()> {
+    let dir = PathBuf::from(
+        args.get(2)
+            .ok_or_else(|| anyhow!("usage: codrop ignore <dir> <file|subdir|pattern>"))?,
+    );
+    let raw = args
+        .get(3)
+        .ok_or_else(|| anyhow!("usage: codrop ignore <dir> <file|subdir|pattern>"))?;
+    std::fs::create_dir_all(&dir)?;
+    // Normalize against the canonical root so tab-completed absolute paths become relative.
+    let root = dir.canonicalize().unwrap_or(dir.clone());
+    let pattern = codrop_sync_engine::normalize_pattern(&root, raw);
+    if codrop_sync_engine::append_ignore(&root, &pattern)? {
+        println!("codrop: ignoring '{pattern}' in {}", dir.display());
+        println!("  ({} updated — restart the daemon to apply)", codrop_sync_engine::IGNORE_FILE);
+    } else {
+        println!("codrop: already ignoring '{pattern}' in {}", dir.display());
+    }
     Ok(())
 }
 
@@ -420,8 +447,12 @@ async fn run(args: &[String]) -> Result<()> {
     let paired = load_peers(&root);
     let trusted = Arc::new(paired.clone());
 
+    // Ignore policy = built-in defaults + <root>/.codropignore, loaded once. Built on the
+    // canonical root so it matches the absolute paths the watcher and scan hand it.
+    let matcher = Arc::new(Matcher::load(&root));
+
     let engine = Arc::new(Engine::open(&root, root.join(".codrop"))?);
-    let indexed = scan(&engine, &root)?;
+    let indexed = scan(&engine, &matcher, &root)?;
 
     let key = net::load_or_create_key(&root.join(".codrop/endpoint.key"))?;
     let endpoint = net::endpoint_with_key(key).await?;
@@ -456,7 +487,7 @@ async fn run(args: &[String]) -> Result<()> {
 
     println!("live. ctrl-c to stop.");
     while let Some(path) = ev_rx.recv().await {
-        if is_ignored(&path) {
+        if is_ignored(&matcher, &path) {
             continue;
         }
 
@@ -587,27 +618,23 @@ async fn push_all(engine: &Engine, conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn is_ignored(path: &Path) -> bool {
-    path.components().any(|c| {
-        c.as_os_str()
-            .to_str()
-            .map(|s| IGNORE.contains(&s))
-            .unwrap_or(false)
-    })
+fn is_ignored(matcher: &Matcher, path: &Path) -> bool {
+    matcher.is_ignored(path, path.is_dir())
 }
 
 /// Recursively observe every file under `root` (skipping ignored dirs) into the index.
-fn scan(engine: &Engine, root: &Path) -> Result<usize> {
+fn scan(engine: &Engine, matcher: &Matcher, root: &Path) -> Result<usize> {
     let mut count = 0;
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         for entry in std::fs::read_dir(&dir)? {
             let entry = entry?;
-            if IGNORE.contains(&entry.file_name().to_string_lossy().as_ref()) {
+            let path = entry.path();
+            let is_dir = path.is_dir();
+            if matcher.is_ignored(&path, is_dir) {
                 continue;
             }
-            let path = entry.path();
-            if path.is_dir() {
+            if is_dir {
                 stack.push(path);
             } else if path.is_file() {
                 engine.observe(&path)?;
