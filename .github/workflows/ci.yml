@@ -4,11 +4,12 @@ name: CI
 on: [push, pull_request]
 
 jobs:
-  build:
-    name: cargo build
+  build-test:
+    name: build & test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace
+      - run: cargo test --workspace
