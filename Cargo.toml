@@ -12,6 +12,7 @@ edition = "2021"
 rust-version = "1.91"   # iroh 1.0 requires rustc >= 1.91
 license = "MIT"
 repository = "https://github.com/termdx/Codrop"
+homepage = "https://github.com/termdx/Codrop"
 
 # Shared dependency versions, pinned once here and inherited by members.
 [workspace.dependencies]
