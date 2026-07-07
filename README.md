@@ -26,66 +26,72 @@ Git and Codrop solve different problems. **Use both:** Git for commits, PRs, and
 
 > Codrop is not "git but faster." It is "stop using git to sync uncommitted work across machines."
 
-## Install
+## Compatibility
 
-### Prebuilt binary (recommended)
+Codrop is **Unix-only** — the daemon relies on Unix process and file-permission APIs (`setsid`,
+exec bits, symlinks), so Windows isn't supported. Prebuilt binaries are published for:
 
-Grab the latest release for macOS (Apple Silicon or Intel) or Linux (x86-64) with one command —
-no toolchain required:
+| OS | Architecture | Prebuilt binary | Target triple |
+|---|---|:---:|---|
+| macOS | Apple Silicon (arm64) | ✅ | `aarch64-apple-darwin` |
+| macOS | Intel (x86-64) | ✅ | `x86_64-apple-darwin` |
+| Linux | x86-64 (glibc) | ✅ | `x86_64-unknown-linux-gnu` |
+| Linux | arm64 / musl | ⚙️ from source | — (build with `cargo build --release`) |
+| Windows | any | ❌ | not supported |
+
+Building from source additionally requires **Rust ≥ 1.91**.
+
+## Installation
+
+| Method | Command | Best for |
+|---|---|---|
+| **Homebrew** | `brew install termdx/tap/codrop` | macOS / Linux with Homebrew |
+| **Shell installer** | `curl -LsSf https://github.com/termdx/Codrop/releases/latest/download/codrop-installer.sh \| sh` | quickest one-liner, no toolchain |
+| **Prebuilt archive** | [download from Releases](https://github.com/termdx/Codrop/releases/latest) | pinning a version, air-gapped, manual |
+| **From source** | `cargo install --path crates/daemon` | Rust devs, or an arch without a prebuilt |
+
+After any method, verify with `codrop --version`.
+
+### Homebrew
+
+```bash
+brew install termdx/tap/codrop
+# once the tap is added, `brew install codrop` works too
+```
+
+### Shell installer
+
+Detects your platform, downloads the right binary, and puts `codrop` on your `PATH`:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/termdx/Codrop/releases/latest/download/codrop-installer.sh | sh
 ```
 
-It downloads the right binary for your platform and puts `codrop` on your `PATH`. Or pick a
-specific version / target archive from the [Releases page](https://github.com/termdx/Codrop/releases).
+### Prebuilt archive
 
-```bash
-codrop --version
-```
+Grab the `.tar.xz` for your platform from the
+[latest release](https://github.com/termdx/Codrop/releases/latest), extract it, and move the
+`codrop` binary somewhere on your `PATH`.
 
-> Windows isn't supported (the daemon relies on unix process/permission APIs).
+### From source
 
-## Build from source
-
-Prefer to build it yourself? Requires **Rust ≥ 1.91** (install via [rustup](https://rustup.rs)).
+Requires **Rust ≥ 1.91** ([rustup](https://rustup.rs)).
 
 ```bash
 git clone https://github.com/termdx/Codrop.git
 cd Codrop
+cargo install --path crates/daemon       # installs `codrop` into ~/.cargo/bin (on PATH via rustup)
 ```
 
-### Option A — install the `codrop` command (recommended)
-
-`cargo install` compiles in release mode and copies the binary into `~/.cargo/bin`, which
-rustup already puts on your `PATH` — so `codrop` works from anywhere:
+Or build and symlink manually (so `git pull` + rebuild stays current):
 
 ```bash
-cargo install --path crates/daemon       # installs `codrop`
-cargo install --path crates/transport    # optional: installs `codrop-net` (one-shot sync)
-```
-
-Verify:
-
-```bash
-codrop --version
-```
-
-> If `codrop` isn't found afterwards, add Cargo's bin dir to your shell profile:
-> `export PATH="$HOME/.cargo/bin:$PATH"`.
-
-### Option B — build and link manually
-
-Build once, then put the binary on your `PATH` yourself (symlink so `git pull` + rebuild
-stays current):
-
-```bash
-cargo build --release
-# binaries are in target/release/: codrop, codrop-net, codrop-watchd
+cargo build --release                    # binaries land in target/release/
 ln -sf "$PWD/target/release/codrop" ~/.local/bin/codrop   # ensure ~/.local/bin is on PATH
 ```
 
-Or skip installing and just run in place: `./target/release/codrop --help`.
+> If `codrop` isn't found after `cargo install`, add Cargo's bin dir to your shell profile:
+> `export PATH="$HOME/.cargo/bin:$PATH"`.
 
 ## Usage — the `codrop` daemon
 
@@ -205,3 +211,7 @@ crates/
 ├── daemon/           the codrop live-sync daemon
 └── watcher-daemon/   standalone filesystem watcher
 ```
+
+## License
+
+Codrop is released under the [MIT License](LICENSE).
