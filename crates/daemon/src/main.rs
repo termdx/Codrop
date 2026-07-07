@@ -125,25 +125,27 @@ fn print_help() {
         "\
 A Dropbox for devs: zero-effort sync across your machines, over iroh.
 
-USAGE:
-    codrop run    <dir> [--peer <endpoint-id>] [--detach]
+USAGE:                        (<dir> is optional everywhere — defaults to the current directory)
+    codrop run    [<dir>] [--peer <endpoint-id>] [--detach]
                                               Watch <dir> and sync with its paired peers
                                               (--detach / -d runs it in the background)
-    codrop pair   <dir> <endpoint-id>         Pair <dir> with a peer (trust it + dial it)
-    codrop ignore <dir> <file|subdir|glob>    Stop syncing matching paths (writes .codropignore)
-    codrop id     <dir>                        Print <dir>'s stable endpoint id
-    codrop status <dir>                        Daemon status: connected peers + sync state
-    codrop stop   <dir>                        Stop the daemon running for <dir>
+    codrop pair   [<dir>] <endpoint-id>       Pair <dir> with a peer (trust it + dial it)
+    codrop ignore [<dir>] <file|subdir|glob>  Stop syncing matching paths (writes .codropignore)
+    codrop id     [<dir>]                      Print <dir>'s stable endpoint id
+    codrop status [<dir>]                      Daemon status: connected peers + sync state
+    codrop stop   [<dir>]                      Stop the daemon running for <dir>
     codrop --help                             Show this help
     codrop --version                          Show the version
 
 EXAMPLES:
-    # on each machine: get its id
-    codrop id ~/code
+    # from inside the folder you want to sync — no <dir> needed
+    cd ~/code
+    codrop id                                 # this folder's id
+    codrop pair <other-endpoint-id>           # pair with the other machine (run on BOTH)
+    codrop run                                # start syncing
 
-    # pair the two (run on BOTH, each with the other's id), then just run
-    codrop pair ~/code <other-endpoint-id>
-    codrop run  ~/code
+    # or point at a folder explicitly (handy for scripts / remote dirs)
+    codrop run ~/code --peer <other-endpoint-id>
 
 NOTES:
     • Peers connect by EndpointId (a public key) — no IP addresses; works across NAT/relay.
@@ -151,7 +153,7 @@ NOTES:
       A daemon only talks to peers it's paired with; pairings persist in <dir>/.codrop/peers.
     • Pair every machine with every other for a full N-way mesh.
     • Ignores: node_modules/.git/target/dist/build/.next are skipped by default; add your own
-      with `codrop ignore <dir> <pattern>` (or edit <dir>/.codropignore, gitignore syntax).
+      with `codrop ignore <pattern>` (or edit <dir>/.codropignore, gitignore syntax).
       Ignores are sender-side and sync between peers as .codropignore propagates.
     • State lives in <dir>/.codrop, added to .gitignore automatically.
 "
@@ -161,7 +163,7 @@ NOTES:
 /// Print the stable endpoint id for `<dir>` without starting the daemon (generates the key on
 /// first use). Use it to learn a folder's id for the other side's `--peer`.
 fn id_cmd(args: &[String]) -> Result<()> {
-    let dir = PathBuf::from(args.get(2).ok_or_else(|| anyhow!("usage: codrop id <dir>"))?);
+    let dir = dir_or_cwd(args.get(2))?;
     std::fs::create_dir_all(&dir)?;
     let key = net::load_or_create_key(&dir.join(".codrop/endpoint.key"))?;
     // Creating .codrop here too → keep it consistent with `run` and out of git.
@@ -173,10 +175,16 @@ fn id_cmd(args: &[String]) -> Result<()> {
 /// Pair `<dir>` with a peer: remember its endpoint id so this daemon both trusts it (accepts its
 /// connections) and dials it on `run`. Do this on each side, then just `codrop run`.
 fn pair_cmd(args: &[String]) -> Result<()> {
-    let dir = PathBuf::from(args.get(2).ok_or_else(|| anyhow!("usage: codrop pair <dir> <id>"))?);
-    let id: EndpointId = args
-        .get(3)
-        .ok_or_else(|| anyhow!("usage: codrop pair <dir> <id>"))?
+    // `pair <id>` pairs the cwd; `pair <dir> <id>` pairs an explicit dir. The id is required, so
+    // a lone argument is unambiguously the id.
+    let rest: Vec<&String> = args.iter().skip(2).collect();
+    let usage = || anyhow!("usage: codrop pair [<dir>] <endpoint-id>");
+    let (dir, id_str) = match rest.as_slice() {
+        [id] => (dir_or_cwd(None)?, id.as_str()),
+        [d, id, ..] => (PathBuf::from(d.as_str()), id.as_str()),
+        [] => return Err(usage()),
+    };
+    let id: EndpointId = id_str
         .parse()
         .map_err(|e| anyhow!("invalid endpoint id: {e}"))?;
     std::fs::create_dir_all(dir.join(".codrop"))?;
@@ -190,13 +198,15 @@ fn pair_cmd(args: &[String]) -> Result<()> {
 /// gitignore-style pattern (`*.log`, `.venv/`, `!keep.log`) or a file/subdir — a path under
 /// `<dir>` is stored root-relative. Takes effect on the next `codrop run`.
 fn ignore_cmd(args: &[String]) -> Result<()> {
-    let dir = PathBuf::from(
-        args.get(2)
-            .ok_or_else(|| anyhow!("usage: codrop ignore <dir> <file|subdir|pattern>"))?,
-    );
-    let raw = args
-        .get(3)
-        .ok_or_else(|| anyhow!("usage: codrop ignore <dir> <file|subdir|pattern>"))?;
+    // `ignore <pattern>` targets the cwd; `ignore <dir> <pattern>` targets an explicit dir. The
+    // pattern is required, so a lone argument is unambiguously the pattern.
+    let rest: Vec<&String> = args.iter().skip(2).collect();
+    let usage = || anyhow!("usage: codrop ignore [<dir>] <file|subdir|pattern>");
+    let (dir, raw) = match rest.as_slice() {
+        [pat] => (dir_or_cwd(None)?, pat.as_str()),
+        [d, pat, ..] => (PathBuf::from(d.as_str()), pat.as_str()),
+        [] => return Err(usage()),
+    };
     std::fs::create_dir_all(&dir)?;
     // Normalize against the canonical root so tab-completed absolute paths become relative.
     let root = dir.canonicalize().unwrap_or(dir.clone());
@@ -241,7 +251,7 @@ fn pair_peer(dir: &Path, id: EndpointId) -> Result<()> {
 
 /// Read the daemon's published status for `<dir>` and print peers + sync state.
 fn status_cmd(args: &[String]) -> Result<()> {
-    let dir = PathBuf::from(args.get(2).ok_or_else(|| anyhow!("usage: codrop status <dir>"))?);
+    let dir = dir_or_cwd(args.get(2))?;
     let status = match read_status(&dir)? {
         Some(s) => s,
         None => {
@@ -273,7 +283,7 @@ fn status_cmd(args: &[String]) -> Result<()> {
 
 /// Stop the daemon running for `<dir>` (SIGTERM to its recorded pid).
 fn stop_cmd(args: &[String]) -> Result<()> {
-    let dir = PathBuf::from(args.get(2).ok_or_else(|| anyhow!("usage: codrop stop <dir>"))?);
+    let dir = dir_or_cwd(args.get(2))?;
     let pid = match read_status(&dir)? {
         Some(s) => s.pid,
         None => {
@@ -367,21 +377,46 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// The directory a command operates on: the explicitly-given path, or the current working
+/// directory when omitted. Lets every command be run from inside the synced folder with no
+/// `<dir>` argument (git-style), while an explicit path still works for scripting/remote dirs.
+fn dir_or_cwd(explicit: Option<&String>) -> Result<PathBuf> {
+    match explicit {
+        Some(p) => Ok(PathBuf::from(p)),
+        None => std::env::current_dir().map_err(|e| anyhow!("cannot determine current directory: {e}")),
+    }
+}
+
+/// Positional (non-flag) args after the subcommand: skips `--detach`/`-d` and consumes the value
+/// after `--peer`, so `codrop run` and `codrop run --detach` correctly fall back to the cwd.
+fn positionals(args: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut skip_next = false;
+    for a in args.iter().skip(2) {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        match a.as_str() {
+            "--detach" | "-d" => {}
+            "--peer" => skip_next = true,
+            _ => out.push(a.clone()),
+        }
+    }
+    out
+}
+
 /// Re-spawn this binary as a detached background process (new session, output to a log file),
-/// then return so the parent exits. The child runs `run` normally (the flag is stripped).
-fn detach(args: &[String]) -> Result<()> {
-    // Child argv = our args minus the program name and the detach flag.
-    let child_args: Vec<String> = args
-        .iter()
-        .skip(1)
-        .filter(|a| *a != "--detach" && *a != "-d")
-        .cloned()
-        .collect();
-    // child_args == ["run", <dir>, maybe "--peer", <id>]
-    let dir_arg = child_args
-        .get(1)
-        .ok_or_else(|| anyhow!("usage: codrop run <dir> [--peer <id>] --detach"))?;
-    let dir = PathBuf::from(dir_arg.as_str());
+/// then return so the parent exits. The child is given an explicit absolute `<dir>` (and `--peer`
+/// if any) so it never has to re-resolve the cwd from a different working directory.
+fn detach(dir: &Path, peer: Option<EndpointId>) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let dir = dir.canonicalize()?;
+    let mut child_args = vec!["run".to_string(), dir.to_string_lossy().into_owned()];
+    if let Some(id) = peer {
+        child_args.push("--peer".to_string());
+        child_args.push(id.to_string());
+    }
 
     let state = dir.join(".codrop");
     std::fs::create_dir_all(&state)?;
@@ -422,23 +457,31 @@ fn detach(args: &[String]) -> Result<()> {
 }
 
 async fn run(args: &[String]) -> Result<()> {
+    // Resolve the target dir (first positional, else the cwd) and the optional --peer id up front,
+    // so --detach can hand the child a fully-explicit argv.
+    let pos = positionals(args);
+    let dir = dir_or_cwd(pos.first())?;
+    let peer: Option<EndpointId> = match args.iter().position(|a| a == "--peer") {
+        Some(i) => Some(
+            args.get(i + 1)
+                .ok_or_else(|| anyhow!("--peer needs an endpoint id"))?
+                .parse()
+                .map_err(|e| anyhow!("invalid endpoint id: {e}"))?,
+        ),
+        None => None,
+    };
+
     // --detach: re-spawn ourselves as a background process and return, before any heavy init.
     if args.iter().any(|a| a == "--detach" || a == "-d") {
-        return detach(args);
+        return detach(&dir, peer);
     }
 
     banner();
-    let dir = PathBuf::from(args.get(2).ok_or_else(|| anyhow!("usage: codrop run <dir> [--peer <id>]"))?);
     std::fs::create_dir_all(&dir)?;
     let root = dir.canonicalize()?;
 
     // `--peer <id>` is shorthand for "pair this id, then run" — it's added to the peers file.
-    if let Some(i) = args.iter().position(|a| a == "--peer") {
-        let id: EndpointId = args
-            .get(i + 1)
-            .ok_or_else(|| anyhow!("--peer needs an endpoint id"))?
-            .parse()
-            .map_err(|e| anyhow!("invalid endpoint id: {e}"))?;
+    if let Some(id) = peer {
         pair_peer(&dir, id)?;
     }
 

@@ -70,13 +70,17 @@ Or skip installing and just run in place: `./target/release/codrop --help`.
 
 ## Usage — the `codrop` daemon
 
+`<dir>` is **optional on every command** — omit it and Codrop uses the current directory, so you
+can just `cd` into a folder and run `codrop …` (git-style). An explicit path still works when you
+want to target another folder or script it.
+
 ```
-codrop run  <dir> [--peer <endpoint-id>] [--detach]  watch <dir> and sync with its paired peers
-codrop pair <dir> <endpoint-id>                      pair with a peer (trust it + dial it)
-codrop ignore <dir> <file|subdir|glob>               stop syncing matching paths (.codropignore)
-codrop id     <dir>                                  print <dir>'s stable endpoint id
-codrop status <dir>                                  show connected peers + sync state
-codrop stop   <dir>                                  stop the daemon for <dir>
+codrop run  [<dir>] [--peer <endpoint-id>] [--detach]  watch <dir> and sync with its paired peers
+codrop pair [<dir>] <endpoint-id>                      pair with a peer (trust it + dial it)
+codrop ignore [<dir>] <file|subdir|glob>               stop syncing matching paths (.codropignore)
+codrop id     [<dir>]                                  print <dir>'s stable endpoint id
+codrop status [<dir>]                                  show connected peers + sync state
+codrop stop   [<dir>]                                  stop the daemon for <dir>
 codrop --help | --version
 ```
 
@@ -84,12 +88,14 @@ A daemon only talks to peers it's **paired** with. Pairing is mutual: run `codro
 side with the other's id, then just `codrop run`.
 
 ```bash
+cd ~/code                   # work from inside the folder — no <dir> needed
+
 # on each machine: get its id
-codrop id ~/code            #  → the endpoint id (also printed in the run banner)
+codrop id                   #  → the endpoint id (also printed in the run banner)
 
 # pair the two (run on BOTH, each with the OTHER's id), then run
-codrop pair ~/code <other-id>
-codrop run  ~/code
+codrop pair <other-id>
+codrop run
 ```
 
 Now edits in `~/code` on either machine appear on the other within about a second — new files,
