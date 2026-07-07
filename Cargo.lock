@@ -352,7 +352,7 @@ dependencies = [
 
 [[package]]
 name = "codrop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "codrop-sync-engine",
@@ -368,7 +368,7 @@ dependencies = [
 
 [[package]]
 name = "codrop-sync-engine"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "blake3",
@@ -382,7 +382,7 @@ dependencies = [
 
 [[package]]
 name = "codrop-transport"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "codrop-sync-engine",
@@ -396,7 +396,7 @@ dependencies = [
 
 [[package]]
 name = "codrop-watchd"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "blake3",

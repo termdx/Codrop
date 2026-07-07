@@ -7,7 +7,7 @@ members = ["crates/*"]
 
 # Shared metadata inherited by member crates via `field.workspace = true`.
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.91"   # iroh 1.0 requires rustc >= 1.91
 license = "MIT"
