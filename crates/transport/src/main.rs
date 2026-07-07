@@ -41,7 +41,10 @@ async fn serve_cmd(args: &[String]) -> Result<()> {
 }
 
 async fn pull_cmd(args: &[String]) -> Result<()> {
-    let root = PathBuf::from(args.get(2).ok_or_else(|| anyhow!("usage: pull <root> <id>"))?);
+    let root = PathBuf::from(
+        args.get(2)
+            .ok_or_else(|| anyhow!("usage: pull <root> <id>"))?,
+    );
     std::fs::create_dir_all(&root)?;
     let root = root.canonicalize()?;
     let id: EndpointId = args

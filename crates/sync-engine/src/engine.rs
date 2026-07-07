@@ -111,7 +111,9 @@ impl Engine {
         let meta = std::fs::symlink_metadata(abs_path)?;
 
         if meta.file_type().is_symlink() {
-            let target = std::fs::read_link(abs_path)?.to_string_lossy().replace('\\', "/");
+            let target = std::fs::read_link(abs_path)?
+                .to_string_lossy()
+                .replace('\\', "/");
             let prev = self.index.get(&rel)?;
             let changed = prev.as_ref().map(|p| p.symlink != target).unwrap_or(true);
             if changed {
@@ -128,7 +130,12 @@ impl Engine {
                     symlink: target,
                 })?;
             }
-            return Ok(Observation { path: rel, hash: String::new(), size: 0, changed });
+            return Ok(Observation {
+                path: rel,
+                hash: String::new(),
+                size: 0,
+                changed,
+            });
         }
 
         let hash = self.store.put_path(abs_path)?;
@@ -343,13 +350,26 @@ impl Engine {
             remote.path
         );
         let (winner, winner_size, winner_mode, loser, loser_mode) = if remote.hash > local.hash {
-            (remote.hash.clone(), remote.size, remote.mode, local.hash.clone(), local.mode)
+            (
+                remote.hash.clone(),
+                remote.size,
+                remote.mode,
+                local.hash.clone(),
+                local.mode,
+            )
         } else {
-            (local.hash.clone(), local.size, local.mode, remote.hash.clone(), remote.mode)
+            (
+                local.hash.clone(),
+                local.size,
+                local.mode,
+                remote.hash.clone(),
+                remote.mode,
+            )
         };
 
         // winner takes the canonical path with the merged clock.
-        self.store.materialize(&winner, &self.root.join(&remote.path), winner_mode)?;
+        self.store
+            .materialize(&winner, &self.root.join(&remote.path), winner_mode)?;
         self.index.upsert(&FileRecord {
             path: remote.path.clone(),
             hash: winner,

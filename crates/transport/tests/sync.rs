@@ -9,7 +9,10 @@ use std::fs;
 use std::sync::Arc;
 
 fn addr_of(ep: &Endpoint) -> EndpointAddr {
-    EndpointAddr::from_parts(ep.id(), ep.bound_sockets().into_iter().map(TransportAddr::Ip))
+    EndpointAddr::from_parts(
+        ep.id(),
+        ep.bound_sockets().into_iter().map(TransportAddr::Ip),
+    )
 }
 
 async fn loopback_endpoint() -> Endpoint {

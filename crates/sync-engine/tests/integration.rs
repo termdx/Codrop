@@ -42,7 +42,13 @@ fn observe_stores_indexes_and_bumps_clock() {
     let again = engine.observe(&f).unwrap();
     assert!(!again.changed);
     assert_eq!(
-        engine.index().get("a.txt").unwrap().unwrap().vclock.get(engine.device_id()),
+        engine
+            .index()
+            .get("a.txt")
+            .unwrap()
+            .unwrap()
+            .vclock
+            .get(engine.device_id()),
         1
     );
 
@@ -52,7 +58,13 @@ fn observe_stores_indexes_and_bumps_clock() {
     assert!(edited.changed);
     assert_ne!(edited.hash, obs.hash);
     assert_eq!(
-        engine.index().get("a.txt").unwrap().unwrap().vclock.get(engine.device_id()),
+        engine
+            .index()
+            .get("a.txt")
+            .unwrap()
+            .unwrap()
+            .vclock
+            .get(engine.device_id()),
         2
     );
 }
@@ -141,7 +153,10 @@ fn concurrent_edits_keep_both() {
     // and is NOT indexed (it doesn't sync).
     for (e, root) in [(&a, &a_root), (&b, &b_root)] {
         let backup = root.join(".codrop/conflicts/foo.txt");
-        assert!(backup.exists(), "conflict backup missing under .codrop/conflicts");
+        assert!(
+            backup.exists(),
+            "conflict backup missing under .codrop/conflicts"
+        );
         let mut got = vec![
             fs::read(root.join("foo.txt")).unwrap(),
             fs::read(&backup).unwrap(),
@@ -173,7 +188,9 @@ fn rejects_unsafe_peer_paths() {
     // Absolute, parent-traversal, and a traversal tombstone are all rejected before touching fs.
     assert!(e.apply_incoming(&evil("/etc/pwned", false)).is_err());
     assert!(e.apply_incoming(&evil("../escape.txt", false)).is_err());
-    assert!(e.apply_incoming(&evil("../../.ssh/authorized_keys", true)).is_err());
+    assert!(e
+        .apply_incoming(&evil("../../.ssh/authorized_keys", true))
+        .is_err());
     assert!(e.apply_incoming(&evil("a/../../b", false)).is_err());
 }
 
@@ -213,7 +230,10 @@ fn concurrent_delete_vs_edit_keeps_edit() {
     let (rec2, bytes2) = record_of(&b, &b_root, "foo.txt");
 
     // B applies A's delete → its edit wins (file kept).
-    assert_eq!(b.apply_incoming(&tomb).unwrap(), ApplyOutcome::ConflictKeptLocal);
+    assert_eq!(
+        b.apply_incoming(&tomb).unwrap(),
+        ApplyOutcome::ConflictKeptLocal
+    );
     assert_eq!(fs::read(b_root.join("foo.txt")).unwrap(), b"v2-edited");
 
     // A applies B's edit → resurrects over its own delete.
@@ -260,12 +280,17 @@ fn chunking_dedups_and_deltas() {
     let mut seed = 0x1234_5678u64;
     let mut a = vec![0u8; 300_000];
     for byte in a.iter_mut() {
-        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         *byte = (seed >> 33) as u8;
     }
     let ha = store.put_bytes(&a).unwrap();
     let objs1 = count_files(&objects);
-    assert!(objs1 > 5, "expected the blob to split into several chunks, got {objs1}");
+    assert!(
+        objs1 > 5,
+        "expected the blob to split into several chunks, got {objs1}"
+    );
 
     // Storing identical content again adds nothing (full dedup).
     store.put_bytes(&a).unwrap();
@@ -277,7 +302,10 @@ fn chunking_dedups_and_deltas() {
     let hb = store.put_bytes(&b).unwrap();
     assert_ne!(ha, hb);
     let new = count_files(&objects) - objs1;
-    assert!((1..5).contains(&new), "expected a few new chunks, got {new} of {objs1}");
+    assert!(
+        (1..5).contains(&new),
+        "expected a few new chunks, got {new} of {objs1}"
+    );
 
     // Reassembly is exact for both versions.
     assert_eq!(store.read(&ha).unwrap().unwrap(), a);
@@ -288,7 +316,9 @@ fn count_files(dir: &std::path::Path) -> usize {
     let mut n = 0;
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&d) else { continue };
+        let Ok(entries) = fs::read_dir(&d) else {
+            continue;
+        };
         for e in entries.flatten() {
             let p = e.path();
             if p.is_dir() {
@@ -308,7 +338,9 @@ fn state_dir_is_gitignored() {
 
     // Opening the engine adds .codrop/ to the root .gitignore.
     let gi = fs::read_to_string(root.join(".gitignore")).unwrap();
-    assert!(gi.lines().any(|l| l.trim().trim_end_matches('/') == ".codrop"));
+    assert!(gi
+        .lines()
+        .any(|l| l.trim().trim_end_matches('/') == ".codrop"));
 
     // Idempotent and non-destructive: a pre-existing .gitignore keeps its entries and gets
     // .codrop appended exactly once.
@@ -358,7 +390,10 @@ fn exec_bit_survives_sync() {
     b.store().put_bytes(&bytes).unwrap();
     assert_eq!(b.apply_incoming(&rec).unwrap(), ApplyOutcome::Applied);
 
-    let mode = fs::metadata(b_root.join("deploy.sh")).unwrap().permissions().mode();
+    let mode = fs::metadata(b_root.join("deploy.sh"))
+        .unwrap()
+        .permissions()
+        .mode();
     assert_eq!(mode & 0o111, 0o111, "exec bits must be set on the peer");
 }
 
@@ -379,7 +414,14 @@ fn chmod_only_propagates_to_already_synced_file() {
     let (rec1, bytes) = record_of(&a, &a_root, "tool");
     b.store().put_bytes(&bytes).unwrap();
     b.apply_incoming(&rec1).unwrap();
-    assert_eq!(fs::metadata(b_root.join("tool")).unwrap().permissions().mode() & 0o111, 0);
+    assert_eq!(
+        fs::metadata(b_root.join("tool"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o111,
+        0
+    );
 
     // Bare chmod +x on A — no content edit.
     fs::set_permissions(&f, fs::Permissions::from_mode(0o755)).unwrap();
@@ -391,7 +433,11 @@ fn chmod_only_propagates_to_already_synced_file() {
     // B already has the identical content — must still apply the mode.
     assert_eq!(b.apply_incoming(&rec2).unwrap(), ApplyOutcome::Applied);
     assert_eq!(
-        fs::metadata(b_root.join("tool")).unwrap().permissions().mode() & 0o111,
+        fs::metadata(b_root.join("tool"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o111,
         0o111,
         "chmod +x must land on the already-synced peer"
     );
@@ -414,8 +460,16 @@ fn symlink_syncs_as_a_link_and_retargets() {
     // No content to seed — apply directly (the transport's fetch guard skips empty hashes).
     assert_eq!(b.apply_incoming(&rec).unwrap(), ApplyOutcome::Applied);
     let meta = fs::symlink_metadata(b_root.join("link")).unwrap();
-    assert!(meta.file_type().is_symlink(), "must materialize as a link, not an inlined file");
-    assert_eq!(fs::read_link(b_root.join("link")).unwrap().to_string_lossy(), "target/file.txt");
+    assert!(
+        meta.file_type().is_symlink(),
+        "must materialize as a link, not an inlined file"
+    );
+    assert_eq!(
+        fs::read_link(b_root.join("link"))
+            .unwrap()
+            .to_string_lossy(),
+        "target/file.txt"
+    );
 
     // Retarget: hash stays "" but the target changes → must not fast-skip.
     fs::remove_file(a_root.join("link")).unwrap();
@@ -424,5 +478,10 @@ fn symlink_syncs_as_a_link_and_retargets() {
     assert!(obs2.changed, "a symlink retarget must register as a change");
     let rec2 = a.index().get("link").unwrap().unwrap();
     assert_eq!(b.apply_incoming(&rec2).unwrap(), ApplyOutcome::Applied);
-    assert_eq!(fs::read_link(b_root.join("link")).unwrap().to_string_lossy(), "other/place.txt");
+    assert_eq!(
+        fs::read_link(b_root.join("link"))
+            .unwrap()
+            .to_string_lossy(),
+        "other/place.txt"
+    );
 }

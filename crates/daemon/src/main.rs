@@ -116,7 +116,10 @@ fn banner() {
     } else {
         println!("{BANNER}");
     }
-    println!("  live folder sync across your machines · v{}\n", env!("CARGO_PKG_VERSION"));
+    println!(
+        "  live folder sync across your machines · v{}\n",
+        env!("CARGO_PKG_VERSION")
+    );
 }
 
 fn print_help() {
@@ -213,7 +216,10 @@ fn ignore_cmd(args: &[String]) -> Result<()> {
     let pattern = codrop_sync_engine::normalize_pattern(&root, raw);
     if codrop_sync_engine::append_ignore(&root, &pattern)? {
         println!("codrop: ignoring '{pattern}' in {}", dir.display());
-        println!("  ({} updated — restart the daemon to apply)", codrop_sync_engine::IGNORE_FILE);
+        println!(
+            "  ({} updated — restart the daemon to apply)",
+            codrop_sync_engine::IGNORE_FILE
+        );
     } else {
         println!("codrop: already ignoring '{pattern}' in {}", dir.display());
     }
@@ -260,7 +266,11 @@ fn status_cmd(args: &[String]) -> Result<()> {
         }
     };
     if !pid_alive(status.pid) {
-        println!("codrop: not running ({} — last pid {} is gone)", dir.display(), status.pid);
+        println!(
+            "codrop: not running ({} — last pid {} is gone)",
+            dir.display(),
+            status.pid
+        );
         return Ok(());
     }
 
@@ -329,7 +339,12 @@ fn pid_alive(pid: u32) -> bool {
 }
 
 /// Periodically publish the daemon's live status to `<state>/status.json`.
-fn spawn_status_writer(state_dir: PathBuf, endpoint: Endpoint, engine: Arc<Engine>, peers: PeerSet) {
+fn spawn_status_writer(
+    state_dir: PathBuf,
+    endpoint: Endpoint,
+    engine: Arc<Engine>,
+    peers: PeerSet,
+) {
     tokio::spawn(async move {
         loop {
             let snapshot = snapshot_status(&endpoint, &engine, &peers).await;
@@ -347,7 +362,10 @@ async fn snapshot_status(endpoint: &Endpoint, engine: &Engine, peers: &PeerSet) 
         .iter()
         .map(|c| c.remote_id().to_string())
         .filter(|id| seen.insert(id.clone())) // dedup (inbound + outbound to same peer)
-        .map(|id| PeerStatus { id, connected: true })
+        .map(|id| PeerStatus {
+            id,
+            connected: true,
+        })
         .collect();
     drop(set);
 
@@ -383,7 +401,9 @@ fn now_ms() -> i64 {
 fn dir_or_cwd(explicit: Option<&String>) -> Result<PathBuf> {
     match explicit {
         Some(p) => Ok(PathBuf::from(p)),
-        None => std::env::current_dir().map_err(|e| anyhow!("cannot determine current directory: {e}")),
+        None => {
+            std::env::current_dir().map_err(|e| anyhow!("cannot determine current directory: {e}"))
+        }
     }
 }
 
@@ -505,11 +525,21 @@ async fn run(args: &[String]) -> Result<()> {
 
     let peers: PeerSet = Arc::new(Mutex::new(Vec::new()));
 
-    spawn_accept_loop(endpoint.clone(), engine.clone(), peers.clone(), trusted.clone());
+    spawn_accept_loop(
+        endpoint.clone(),
+        engine.clone(),
+        peers.clone(),
+        trusted.clone(),
+    );
     for &pid in &paired {
         spawn_peer_link(endpoint.clone(), engine.clone(), peers.clone(), pid);
     }
-    spawn_status_writer(root.join(".codrop"), endpoint.clone(), engine.clone(), peers.clone());
+    spawn_status_writer(
+        root.join(".codrop"),
+        endpoint.clone(),
+        engine.clone(),
+        peers.clone(),
+    );
 
     // File watcher on a dedicated thread; events bridged to this async loop.
     let (raw_tx, raw_rx) = std::sync::mpsc::channel();
@@ -517,12 +547,10 @@ async fn run(args: &[String]) -> Result<()> {
     debouncer.watcher().watch(&root, RecursiveMode::Recursive)?;
     let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel::<PathBuf>();
     std::thread::spawn(move || {
-        for result in raw_rx {
-            if let Ok(events) = result {
-                for event in events {
-                    for path in &event.event.paths {
-                        let _ = ev_tx.send(path.clone());
-                    }
+        for events in raw_rx.into_iter().flatten() {
+            for event in events {
+                for path in &event.event.paths {
+                    let _ = ev_tx.send(path.clone());
                 }
             }
         }
@@ -551,7 +579,9 @@ async fn run(args: &[String]) -> Result<()> {
                     continue; // unchanged content/mode/target (incl. just-applied pushes) → no echo
                 }
                 println!("changed: {} ({})", obs.path, describe(&obs.hash));
-                let Some(rec) = engine.index().get(&obs.path)? else { continue };
+                let Some(rec) = engine.index().get(&obs.path)? else {
+                    continue;
+                };
                 broadcast(&peers, &rec).await;
             }
             Err(_) => {
@@ -587,7 +617,10 @@ fn spawn_accept_loop(
                 if let Ok(conn) = incoming.await {
                     let id = conn.remote_id();
                     if !trusted.contains(&id) {
-                        eprintln!("rejected untrusted peer {} (codrop trust to allow)", id.fmt_short());
+                        eprintln!(
+                            "rejected untrusted peer {} (codrop trust to allow)",
+                            id.fmt_short()
+                        );
                         conn.close(0u32.into(), b"untrusted");
                         return;
                     }

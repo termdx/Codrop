@@ -163,7 +163,14 @@ async fn fetch_and_apply(
     // Fetch content only for records that have content: an empty hash means a tombstone or a
     // symlink (both carry no chunks), so there's nothing to pull — apply directly.
     if !record.hash.is_empty() && !engine.store().has(&record.hash) {
-        let chunks = match request(conn, &Req::Manifest { hash: record.hash.clone() }).await? {
+        let chunks = match request(
+            conn,
+            &Req::Manifest {
+                hash: record.hash.clone(),
+            },
+        )
+        .await?
+        {
             Resp::Manifest { chunks } => chunks,
             _ => bail!("peer has no manifest for {}", record.path),
         };
@@ -195,7 +202,14 @@ pub async fn connect(endpoint: &Endpoint, peer: impl Into<EndpointAddr>) -> Resu
 /// Notify a peer of a changed record over an existing connection (live sync). The peer pulls
 /// any chunks it's missing and applies it; we return once it acks.
 pub async fn push(conn: &Connection, record: &FileRecord) -> Result<()> {
-    match request(conn, &Req::Push { record: record.clone() }).await? {
+    match request(
+        conn,
+        &Req::Push {
+            record: record.clone(),
+        },
+    )
+    .await?
+    {
         Resp::Ok => Ok(()),
         _ => bail!("unexpected response to Push"),
     }
@@ -237,7 +251,11 @@ pub async fn pull_over(engine: &Engine, conn: &Connection) -> Result<SyncStats> 
         // Fast-skip what we already have/supersede; otherwise fetch missing chunks and apply.
         match engine.evaluate(rec)? {
             SyncAction::Skip => stats.skipped += 1,
-            _ => tally(&mut stats, fetch_and_apply(engine, conn, rec).await?, &rec.path),
+            _ => tally(
+                &mut stats,
+                fetch_and_apply(engine, conn, rec).await?,
+                &rec.path,
+            ),
         }
     }
     Ok(stats)

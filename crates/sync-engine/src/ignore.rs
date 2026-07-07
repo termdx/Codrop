@@ -14,8 +14,8 @@
 //! ignore file reaches it.
 
 use crate::IGNORE_DIRS;
-use anyhow::Result;
 use ::ignore::gitignore::{Gitignore, GitignoreBuilder};
+use anyhow::Result;
 use std::path::Path;
 
 /// Name of the user-editable ignore file at the synced root.

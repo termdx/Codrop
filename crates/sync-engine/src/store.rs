@@ -78,7 +78,10 @@ impl BlobStore {
     /// Store a chunk after verifying its hash matches (a peer could send anything).
     pub fn put_chunk(&self, hash: &str, bytes: &[u8]) -> Result<()> {
         let actual = blake3::hash(bytes).to_hex().to_string();
-        anyhow::ensure!(actual == hash, "chunk hash mismatch (got {actual}, expected {hash})");
+        anyhow::ensure!(
+            actual == hash,
+            "chunk hash mismatch (got {actual}, expected {hash})"
+        );
         self.write_object(hash, bytes)
     }
 
@@ -90,7 +93,10 @@ impl BlobStore {
         }
         let text = fs::read_to_string(path)?;
         Ok(Some(
-            text.lines().filter(|l| !l.is_empty()).map(String::from).collect(),
+            text.lines()
+                .filter(|l| !l.is_empty())
+                .map(String::from)
+                .collect(),
         ))
     }
 
@@ -185,7 +191,10 @@ impl BlobStore {
         }
         // Unique temp per file+call: `with_extension` would map foo.txt and foo.md to the same
         // foo.codrop-tmp and clobber under concurrent materialize.
-        let name = dest.file_name().and_then(|n| n.to_str()).unwrap_or("codrop");
+        let name = dest
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("codrop");
         let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
         let tmp = dest.with_file_name(format!(".{name}.{seq}.codrop-tmp"));
         fs::write(&tmp, &bytes)?;
