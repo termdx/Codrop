@@ -161,6 +161,10 @@ codrop-net pull  ~/projectB <id>      # pull projectA's files into projectB, onc
 
 ## Behavior & limitations
 
+- **Exec bits & symlinks are preserved.** A file's unix permissions travel with it, so an
+  executable script (`chmod +x`) stays executable on every machine — even a bare `chmod` with no
+  content edit propagates. Symlinks sync as links (recorded by target, never followed and inlined
+  as a copy). Mode preservation is a unix feature; Windows isn't supported yet.
 - **Deletes propagate** across devices (as tombstones).
 - **Concurrent edits keep both versions** — one wins the canonical path (deterministically); the
   other is preserved under `.codrop/conflicts/<same path>` (same name and folder structure), so

@@ -102,14 +102,15 @@ fn main() -> Result<()> {
                     continue;
                 }
 
+                let short = |h: &str| h[..16.min(h.len())].to_string();
                 match engine.observe(path) {
                     Ok(obs) if obs.changed => println!(
                         "indexed:   {} hash={} size={}",
                         obs.path,
-                        &obs.hash[..16],
+                        short(&obs.hash),
                         obs.size
                     ),
-                    Ok(obs) => println!("unchanged: {} ({})", obs.path, &obs.hash[..16]),
+                    Ok(obs) => println!("unchanged: {} ({})", obs.path, short(&obs.hash)),
                     Err(e) => eprintln!("observe failed for {}: {e}", path.display()),
                 }
             }

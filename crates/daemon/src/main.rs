@@ -534,30 +534,36 @@ async fn run(args: &[String]) -> Result<()> {
             continue;
         }
 
-        if path.is_file() {
-            // Create or modify.
-            let obs = match engine.observe(&path) {
-                Ok(o) => o,
-                Err(e) => {
-                    eprintln!("observe {}: {e}", path.display());
-                    continue;
+        // lstat (don't follow symlinks): a symlink is observed as a link, not its target; a real
+        // directory event carries no record of its own (its files fire their own events).
+        match std::fs::symlink_metadata(&path) {
+            Ok(m) if m.is_dir() => {}
+            Ok(_) => {
+                // regular file or symlink → create/modify
+                let obs = match engine.observe(&path) {
+                    Ok(o) => o,
+                    Err(e) => {
+                        eprintln!("observe {}: {e}", path.display());
+                        continue;
+                    }
+                };
+                if !obs.changed {
+                    continue; // unchanged content/mode/target (incl. just-applied pushes) → no echo
                 }
-            };
-            if !obs.changed {
-                continue; // unchanged content (incl. just-applied peer pushes) → no echo
+                println!("changed: {} ({})", obs.path, describe(&obs.hash));
+                let Some(rec) = engine.index().get(&obs.path)? else { continue };
+                broadcast(&peers, &rec).await;
             }
-            println!("changed: {} ({})", obs.path, &obs.hash[..12]);
-            let Some(rec) = engine.index().get(&obs.path)? else { continue };
-            broadcast(&peers, &rec).await;
-        } else if !path.exists() {
-            // Possible deletion of a tracked file → tombstone + propagate.
-            match engine.observe_delete(&path) {
-                Ok(Some(tomb)) => {
-                    println!("deleted: {}", tomb.path);
-                    broadcast(&peers, &tomb).await;
+            Err(_) => {
+                // gone → possible deletion of a tracked file → tombstone + propagate
+                match engine.observe_delete(&path) {
+                    Ok(Some(tomb)) => {
+                        println!("deleted: {}", tomb.path);
+                        broadcast(&peers, &tomb).await;
+                    }
+                    Ok(None) => {} // not a tracked live file (dir, temp, already gone)
+                    Err(e) => eprintln!("observe_delete {}: {e}", path.display()),
                 }
-                Ok(None) => {} // not a tracked live file (dir, temp, already gone)
-                Err(e) => eprintln!("observe_delete {}: {e}", path.display()),
             }
         }
     }
@@ -665,23 +671,36 @@ fn is_ignored(matcher: &Matcher, path: &Path) -> bool {
     matcher.is_ignored(path, path.is_dir())
 }
 
-/// Recursively observe every file under `root` (skipping ignored dirs) into the index.
+/// Short label for an observation's content: the hash prefix for a file, or `symlink` for a link
+/// (whose hash is empty). Avoids slicing an empty string.
+fn describe(hash: &str) -> String {
+    if hash.is_empty() {
+        "symlink".to_string()
+    } else {
+        hash[..12.min(hash.len())].to_string()
+    }
+}
+
+/// Recursively observe every file under `root` (skipping ignored dirs) into the index. Uses the
+/// entry's own file type (never follows symlinks), so a symlink is observed as a link and a
+/// symlink-to-directory is not descended into.
 fn scan(engine: &Engine, matcher: &Matcher, root: &Path) -> Result<usize> {
     let mut count = 0;
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         for entry in std::fs::read_dir(&dir)? {
             let entry = entry?;
+            let ftype = entry.file_type()?;
             let path = entry.path();
-            let is_dir = path.is_dir();
+            let is_dir = ftype.is_dir(); // false for a symlink, even one pointing at a dir
             if matcher.is_ignored(&path, is_dir) {
                 continue;
             }
-            if is_dir {
-                stack.push(path);
-            } else if path.is_file() {
+            if ftype.is_symlink() || ftype.is_file() {
                 engine.observe(&path)?;
                 count += 1;
+            } else if is_dir {
+                stack.push(path);
             }
         }
     }

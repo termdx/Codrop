@@ -71,7 +71,7 @@ fn materialize_roundtrips() {
 
     // Materialize the stored blob to a fresh path (clonefile on APFS, copy elsewhere).
     let dest = tmp.path().join("restored/data.bin");
-    engine.store().materialize(&obs.hash, &dest).unwrap();
+    engine.store().materialize(&obs.hash, &dest, 0).unwrap();
     assert_eq!(fs::read(&dest).unwrap(), b"some bytes here");
 }
 
@@ -167,6 +167,8 @@ fn rejects_unsafe_peer_paths() {
         vclock: VClock::new(),
         updated_ms: 0,
         deleted,
+        mode: 0,
+        symlink: String::new(),
     };
     // Absolute, parent-traversal, and a traversal tombstone are all rejected before touching fs.
     assert!(e.apply_incoming(&evil("/etc/pwned", false)).is_err());
@@ -336,4 +338,91 @@ fn vclock_detects_concurrency() {
     merged.merge(&b);
     assert_eq!(merged.compare(&a), Causality::After);
     assert_eq!(merged.compare(&b), Causality::After);
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_bit_survives_sync() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let (a, a_root) = engine_at(&tmp, "A");
+    let (b, b_root) = engine_at(&tmp, "B");
+
+    // A executable script created and synced to a fresh peer.
+    let script = a_root.join("deploy.sh");
+    fs::write(&script, b"#!/bin/sh\necho hi\n").unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let (rec, bytes) = record_of(&a, &a_root, "deploy.sh");
+    assert_eq!(rec.mode & 0o777, 0o755, "the record must carry the perms");
+    b.store().put_bytes(&bytes).unwrap();
+    assert_eq!(b.apply_incoming(&rec).unwrap(), ApplyOutcome::Applied);
+
+    let mode = fs::metadata(b_root.join("deploy.sh")).unwrap().permissions().mode();
+    assert_eq!(mode & 0o111, 0o111, "exec bits must be set on the peer");
+}
+
+#[cfg(unix)]
+#[test]
+fn chmod_only_propagates_to_already_synced_file() {
+    // The discriminating case: content is identical on both sides; only the mode changed. The
+    // fast-skip on equal hash must NOT swallow it, or `chmod +x` never reaches the peer.
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let (a, a_root) = engine_at(&tmp, "A");
+    let (b, b_root) = engine_at(&tmp, "B");
+
+    // Sync the file first as 0644.
+    let f = a_root.join("tool");
+    fs::write(&f, b"x").unwrap();
+    fs::set_permissions(&f, fs::Permissions::from_mode(0o644)).unwrap();
+    let (rec1, bytes) = record_of(&a, &a_root, "tool");
+    b.store().put_bytes(&bytes).unwrap();
+    b.apply_incoming(&rec1).unwrap();
+    assert_eq!(fs::metadata(b_root.join("tool")).unwrap().permissions().mode() & 0o111, 0);
+
+    // Bare chmod +x on A — no content edit.
+    fs::set_permissions(&f, fs::Permissions::from_mode(0o755)).unwrap();
+    let obs = a.observe(&f).unwrap();
+    assert!(obs.changed, "a bare chmod must register as a change");
+    let rec2 = a.index().get("tool").unwrap().unwrap();
+    assert_eq!(rec2.mode & 0o777, 0o755);
+
+    // B already has the identical content — must still apply the mode.
+    assert_eq!(b.apply_incoming(&rec2).unwrap(), ApplyOutcome::Applied);
+    assert_eq!(
+        fs::metadata(b_root.join("tool")).unwrap().permissions().mode() & 0o111,
+        0o111,
+        "chmod +x must land on the already-synced peer"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_syncs_as_a_link_and_retargets() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (a, a_root) = engine_at(&tmp, "A");
+    let (b, b_root) = engine_at(&tmp, "B");
+
+    std::os::unix::fs::symlink("target/file.txt", a_root.join("link")).unwrap();
+    let obs = a.observe(&a_root.join("link")).unwrap();
+    assert!(obs.changed);
+    assert!(obs.hash.is_empty(), "a symlink carries no content hash");
+    let rec = a.index().get("link").unwrap().unwrap();
+    assert_eq!(rec.symlink, "target/file.txt");
+
+    // No content to seed — apply directly (the transport's fetch guard skips empty hashes).
+    assert_eq!(b.apply_incoming(&rec).unwrap(), ApplyOutcome::Applied);
+    let meta = fs::symlink_metadata(b_root.join("link")).unwrap();
+    assert!(meta.file_type().is_symlink(), "must materialize as a link, not an inlined file");
+    assert_eq!(fs::read_link(b_root.join("link")).unwrap().to_string_lossy(), "target/file.txt");
+
+    // Retarget: hash stays "" but the target changes → must not fast-skip.
+    fs::remove_file(a_root.join("link")).unwrap();
+    std::os::unix::fs::symlink("other/place.txt", a_root.join("link")).unwrap();
+    let obs2 = a.observe(&a_root.join("link")).unwrap();
+    assert!(obs2.changed, "a symlink retarget must register as a change");
+    let rec2 = a.index().get("link").unwrap().unwrap();
+    assert_eq!(b.apply_incoming(&rec2).unwrap(), ApplyOutcome::Applied);
+    assert_eq!(fs::read_link(b_root.join("link")).unwrap().to_string_lossy(), "other/place.txt");
 }

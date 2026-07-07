@@ -172,8 +172,11 @@ impl BlobStore {
         Ok(Some(out))
     }
 
-    /// Materialize full content to `dest` (reassembled from chunks, written atomically).
-    pub fn materialize(&self, full_hash: &str, dest: &Path) -> Result<()> {
+    /// Materialize full content to `dest` (reassembled from chunks, written atomically). `mode`
+    /// is the unix permission bits to apply (`0` = leave default) — set on the temp file *before*
+    /// the rename so `dest` never appears with the wrong perms (e.g. an executable script must
+    /// never be briefly non-executable).
+    pub fn materialize(&self, full_hash: &str, dest: &Path, mode: u32) -> Result<()> {
         let bytes = self
             .read(full_hash)?
             .ok_or_else(|| anyhow!("content {full_hash} not fully in store"))?;
@@ -186,6 +189,13 @@ impl BlobStore {
         let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
         let tmp = dest.with_file_name(format!(".{name}.{seq}.codrop-tmp"));
         fs::write(&tmp, &bytes)?;
+        #[cfg(unix)]
+        if mode != 0 {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))?;
+        }
+        #[cfg(not(unix))]
+        let _ = mode;
         fs::rename(&tmp, dest)?;
         Ok(())
     }

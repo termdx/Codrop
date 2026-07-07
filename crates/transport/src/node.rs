@@ -160,7 +160,9 @@ async fn fetch_and_apply(
     conn: &Connection,
     record: &FileRecord,
 ) -> Result<ApplyOutcome> {
-    if !record.deleted && !engine.store().has(&record.hash) {
+    // Fetch content only for records that have content: an empty hash means a tombstone or a
+    // symlink (both carry no chunks), so there's nothing to pull — apply directly.
+    if !record.hash.is_empty() && !engine.store().has(&record.hash) {
         let chunks = match request(conn, &Req::Manifest { hash: record.hash.clone() }).await? {
             Resp::Manifest { chunks } => chunks,
             _ => bail!("peer has no manifest for {}", record.path),

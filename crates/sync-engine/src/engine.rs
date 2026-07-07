@@ -102,14 +102,45 @@ impl Engine {
             .replace('\\', "/")
     }
 
-    /// Store a file's content and update its index entry. Idempotent for unchanged content.
+    /// Store a file's content (or a symlink's target) and update its index entry. Idempotent for
+    /// unchanged content **and** unchanged mode/target — so a bare `chmod +x` or a symlink
+    /// retarget still registers as a change and propagates. Uses `symlink_metadata` (lstat) so a
+    /// symlink is recorded as a link, never followed and inlined as its target's bytes.
     pub fn observe(&self, abs_path: &Path) -> Result<Observation> {
         let rel = self.rel(abs_path);
+        let meta = std::fs::symlink_metadata(abs_path)?;
+
+        if meta.file_type().is_symlink() {
+            let target = std::fs::read_link(abs_path)?.to_string_lossy().replace('\\', "/");
+            let prev = self.index.get(&rel)?;
+            let changed = prev.as_ref().map(|p| p.symlink != target).unwrap_or(true);
+            if changed {
+                let mut vclock = prev.map(|p| p.vclock).unwrap_or_default();
+                vclock.increment(&self.device_id);
+                self.index.upsert(&FileRecord {
+                    path: rel.clone(),
+                    hash: String::new(),
+                    size: 0,
+                    vclock,
+                    updated_ms: now_ms(),
+                    deleted: false,
+                    mode: 0,
+                    symlink: target,
+                })?;
+            }
+            return Ok(Observation { path: rel, hash: String::new(), size: 0, changed });
+        }
+
         let hash = self.store.put_path(abs_path)?;
-        let size = std::fs::metadata(abs_path)?.len();
+        let size = meta.len();
+        let mode = mode_of(&meta);
 
         let prev = self.index.get(&rel)?;
-        let changed = prev.as_ref().map(|p| p.hash != hash).unwrap_or(true);
+        // Changed if the content, the mode, or the was-a-symlink status differs.
+        let changed = prev
+            .as_ref()
+            .map(|p| p.hash != hash || p.mode != mode || !p.symlink.is_empty())
+            .unwrap_or(true);
 
         if changed {
             let mut vclock = prev.map(|p| p.vclock).unwrap_or_default();
@@ -121,6 +152,8 @@ impl Engine {
                 vclock,
                 updated_ms: now_ms(),
                 deleted: false,
+                mode,
+                symlink: String::new(),
             })?;
         }
 
@@ -146,7 +179,17 @@ impl Engine {
     pub fn evaluate(&self, remote: &FileRecord) -> Result<SyncAction> {
         match self.index.get(&remote.path)? {
             None => Ok(SyncAction::Fetch), // never seen this path
-            Some(local) if local.hash == remote.hash => Ok(SyncAction::Skip), // identical
+            // Identical content AND metadata → nothing to do. Comparing mode + symlink here (not
+            // just hash) is what lets a bare `chmod` or a symlink retarget on an already-synced
+            // file propagate — both leave the content hash unchanged. Tombstones match too (both
+            // "", mode 0, symlink "").
+            Some(local)
+                if local.hash == remote.hash
+                    && local.mode == remote.mode
+                    && local.symlink == remote.symlink =>
+            {
+                Ok(SyncAction::Skip)
+            }
             Some(local) => Ok(match remote.vclock.compare(&local.vclock) {
                 Causality::After => SyncAction::Fetch,
                 Causality::Before | Causality::Equal => SyncAction::Skip,
@@ -170,6 +213,8 @@ impl Engine {
                     vclock,
                     updated_ms: now_ms(),
                     deleted: true,
+                    mode: 0,
+                    symlink: String::new(),
                 };
                 self.index.upsert(&tomb)?;
                 Ok(Some(tomb))
@@ -208,34 +253,24 @@ impl Engine {
         let abs = self.root.join(&remote.path);
 
         if remote.deleted {
-            if abs.exists() {
-                let _ = std::fs::remove_file(&abs);
-            }
-            self.index.upsert(&FileRecord {
-                path: remote.path.clone(),
-                hash: String::new(),
-                size: 0,
-                vclock,
-                updated_ms: now_ms(),
-                deleted: true,
-            })?;
-            return Ok(());
+            remove_any(&abs);
+        } else if !remote.symlink.is_empty() {
+            apply_symlink(&abs, &remote.symlink)?;
+        } else {
+            anyhow::ensure!(
+                self.store.has(&remote.hash),
+                "content for {} ({}) not in store",
+                remote.path,
+                remote.hash
+            );
+            self.store.materialize(&remote.hash, &abs, remote.mode)?;
         }
 
-        anyhow::ensure!(
-            self.store.has(&remote.hash),
-            "content for {} ({}) not in store",
-            remote.path,
-            remote.hash
-        );
-        self.store.materialize(&remote.hash, &abs)?;
+        // Adopt the peer's record verbatim (hash/size/mode/symlink/deleted) with the merged clock.
         self.index.upsert(&FileRecord {
-            path: remote.path.clone(),
-            hash: remote.hash.clone(),
-            size: remote.size,
             vclock,
             updated_ms: now_ms(),
-            deleted: false,
+            ..remote.clone()
         })?;
         Ok(())
     }
@@ -281,20 +316,40 @@ impl Engine {
             return Ok(ApplyOutcome::Skipped);
         }
 
+        // Symlink involved (link-vs-link or link-vs-file): no content to keep-both, so the
+        // content/conflict-copy path below (which reads from the store) doesn't apply. Pick a
+        // deterministic winner — greater (symlink-target, hash) — and apply it; no conflict copy.
+        // Both peers compute the same side, so they converge. (Full symlink-vs-file merge
+        // semantics are out of scope; this just prevents a wedged sync.)
+        if !local.symlink.is_empty() || !remote.symlink.is_empty() {
+            let remote_wins = (remote.symlink.as_str(), remote.hash.as_str())
+                > (local.symlink.as_str(), local.hash.as_str());
+            if remote_wins {
+                self.apply_remote(remote)?; // recomputes the same merged clock
+                return Ok(ApplyOutcome::Applied);
+            }
+            self.index.upsert(&FileRecord {
+                vclock: merged,
+                updated_ms: now_ms(),
+                ..local
+            })?;
+            return Ok(ApplyOutcome::ConflictKeptLocal);
+        }
+
         // both edits, different content → keep both.
         anyhow::ensure!(
             self.store.has(&remote.hash),
             "conflict content for {} not in store",
             remote.path
         );
-        let (winner, winner_size, loser) = if remote.hash > local.hash {
-            (remote.hash.clone(), remote.size, local.hash.clone())
+        let (winner, winner_size, winner_mode, loser, loser_mode) = if remote.hash > local.hash {
+            (remote.hash.clone(), remote.size, remote.mode, local.hash.clone(), local.mode)
         } else {
-            (local.hash.clone(), local.size, remote.hash.clone())
+            (local.hash.clone(), local.size, local.mode, remote.hash.clone(), remote.mode)
         };
 
         // winner takes the canonical path with the merged clock.
-        self.store.materialize(&winner, &self.root.join(&remote.path))?;
+        self.store.materialize(&winner, &self.root.join(&remote.path), winner_mode)?;
         self.index.upsert(&FileRecord {
             path: remote.path.clone(),
             hash: winner,
@@ -302,11 +357,13 @@ impl Engine {
             vclock: merged,
             updated_ms: now_ms(),
             deleted: false,
+            mode: winner_mode,
+            symlink: String::new(),
         })?;
 
         // loser → .codrop/conflicts/<path> (not indexed), preserving folder structure and name.
         let conflict_path = self.conflicts_dir.join(&remote.path);
-        self.store.materialize(&loser, &conflict_path)?;
+        self.store.materialize(&loser, &conflict_path, loser_mode)?;
 
         Ok(ApplyOutcome::Conflicted {
             copy: conflict_path.to_string_lossy().into_owned(),
@@ -365,4 +422,46 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// The permission bits (`st_mode & 0o7777`) to record for a file. `0` on non-unix (no modes to
+/// preserve there). Masked so it round-trips: `chmod` ignores the file-type bits, so storing them
+/// would make the observed mode never equal the applied mode → a false "changed" echo loop.
+#[cfg(unix)]
+fn mode_of(meta: &std::fs::Metadata) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    meta.permissions().mode() & 0o7777
+}
+#[cfg(not(unix))]
+fn mode_of(_meta: &std::fs::Metadata) -> u32 {
+    0
+}
+
+/// Remove whatever is at `abs` — regular file, symlink (even dangling), or directory. Uses
+/// `symlink_metadata` so a broken symlink is removed as a link rather than missed by `exists()`.
+fn remove_any(abs: &Path) {
+    match std::fs::symlink_metadata(abs) {
+        Ok(m) if m.is_dir() => {
+            let _ = std::fs::remove_dir_all(abs);
+        }
+        Ok(_) => {
+            let _ = std::fs::remove_file(abs);
+        }
+        Err(_) => {}
+    }
+}
+
+/// Recreate a symlink at `abs` pointing to `target`, replacing anything already there.
+#[cfg(unix)]
+fn apply_symlink(abs: &Path, target: &str) -> Result<()> {
+    if let Some(parent) = abs.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    remove_any(abs);
+    std::os::unix::fs::symlink(target, abs)?;
+    Ok(())
+}
+#[cfg(not(unix))]
+fn apply_symlink(_abs: &Path, _target: &str) -> Result<()> {
+    anyhow::bail!("symlinks are only supported on unix");
 }
