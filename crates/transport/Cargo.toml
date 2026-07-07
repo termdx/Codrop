@@ -15,6 +15,10 @@ path = "src/lib.rs"
 name = "codrop-net"
 path = "src/main.rs"
 
+# codrop-net is a one-shot demo/utility superseded by the `codrop` daemon — don't ship it.
+[package.metadata.dist]
+dist = false
+
 [dependencies]
 anyhow.workspace = true
 serde.workspace = true

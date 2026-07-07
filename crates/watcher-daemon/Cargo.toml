@@ -11,6 +11,10 @@ repository.workspace = true
 name = "codrop-watchd"
 path = "src/main.rs"
 
+# The standalone watcher was the Phase-0 stepping stone, superseded by `codrop` — don't ship it.
+[package.metadata.dist]
+dist = false
+
 [dependencies]
 notify.workspace = true
 notify-debouncer-full.workspace = true

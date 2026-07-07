@@ -11,7 +11,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.91"   # iroh 1.0 requires rustc >= 1.91
 license = "MIT"
-repository = "https://github.com/emp0/codrop"
+repository = "https://github.com/termdx/Codrop"
 
 # Shared dependency versions, pinned once here and inherited by members.
 [workspace.dependencies]
@@ -37,3 +37,8 @@ iroh = "1"
 # Internal crates
 codrop-sync-engine = { path = "crates/sync-engine" }
 codrop-transport = { path = "crates/transport" }
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

@@ -26,10 +26,29 @@ Git and Codrop solve different problems. **Use both:** Git for commits, PRs, and
 
 > Codrop is not "git but faster." It is "stop using git to sync uncommitted work across machines."
 
-## Build & install
+## Install
 
-There's no hosted package yet, so build from source. Requires **Rust ≥ 1.91** (install via
-[rustup](https://rustup.rs)).
+### Prebuilt binary (recommended)
+
+Grab the latest release for macOS (Apple Silicon or Intel) or Linux (x86-64) with one command —
+no toolchain required:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/termdx/Codrop/releases/latest/download/codrop-installer.sh | sh
+```
+
+It downloads the right binary for your platform and puts `codrop` on your `PATH`. Or pick a
+specific version / target archive from the [Releases page](https://github.com/termdx/Codrop/releases).
+
+```bash
+codrop --version
+```
+
+> Windows isn't supported (the daemon relies on unix process/permission APIs).
+
+## Build from source
+
+Prefer to build it yourself? Requires **Rust ≥ 1.91** (install via [rustup](https://rustup.rs)).
 
 ```bash
 git clone https://github.com/termdx/Codrop.git
