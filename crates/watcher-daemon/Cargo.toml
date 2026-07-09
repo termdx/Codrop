@@ -6,6 +6,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish = false   # Phase-0 stepping stone, superseded by `codrop` — never publish to crates.io
 
 [[bin]]
 name = "codrop-watchd"

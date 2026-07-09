@@ -13,6 +13,7 @@ rust-version = "1.91"   # iroh 1.0 requires rustc >= 1.91
 license = "MIT"
 repository = "https://github.com/termdx/Codrop"
 homepage = "https://github.com/termdx/Codrop"
+readme = "README.md"   # resolved relative to the workspace root when inherited
 
 # Shared dependency versions, pinned once here and inherited by members.
 [workspace.dependencies]
@@ -35,9 +36,10 @@ tokio = { version = "1", features = ["full"] }
 mdns-sd = "0.11"
 # iroh — p2p QUIC with hole-punching + relay fallback (replaces raw quinn transport)
 iroh = "1"
-# Internal crates
-codrop-sync-engine = { path = "crates/sync-engine" }
-codrop-transport = { path = "crates/transport" }
+# Internal crates. `version` is required for crates.io (publish strips the `path`);
+# local builds still resolve via the path.
+codrop-sync-engine = { version = "0.1.1", path = "crates/sync-engine" }
+codrop-transport = { version = "0.1.1", path = "crates/transport" }
 
 # The profile that 'dist' will build with
 [profile.dist]
