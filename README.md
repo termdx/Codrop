@@ -43,15 +43,7 @@ Building from source additionally requires **Rust ≥ 1.91**.
 
 ## Installation
 
-| Method | Command | Best for |
-|---|---|---|
-| **Homebrew** | `brew install termdx/tap/codrop` | macOS / Linux with Homebrew |
-| **Shell installer** | `curl -LsSf https://github.com/termdx/Codrop/releases/latest/download/codrop-installer.sh \| sh` | quickest one-liner, no toolchain |
-| **Prebuilt archive** | [download from Releases](https://github.com/termdx/Codrop/releases/latest) | pinning a version, air-gapped, manual |
-| **`cargo install`** | `cargo install codrop` | Rust devs already on cargo, or an arch without a prebuilt |
-| **From source** | `git clone` + `cargo install --path crates/daemon` | hacking on Codrop itself |
-
-After any method, verify with `codrop --version`.
+After any method below, verify with `codrop --version`.
 
 ### Homebrew
 
