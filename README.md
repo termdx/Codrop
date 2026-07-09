@@ -48,7 +48,8 @@ Building from source additionally requires **Rust ≥ 1.91**.
 | **Homebrew** | `brew install termdx/tap/codrop` | macOS / Linux with Homebrew |
 | **Shell installer** | `curl -LsSf https://github.com/termdx/Codrop/releases/latest/download/codrop-installer.sh \| sh` | quickest one-liner, no toolchain |
 | **Prebuilt archive** | [download from Releases](https://github.com/termdx/Codrop/releases/latest) | pinning a version, air-gapped, manual |
-| **From source** | `cargo install --path crates/daemon` | Rust devs, or an arch without a prebuilt |
+| **`cargo install`** | `cargo install codrop` | Rust devs already on cargo, or an arch without a prebuilt |
+| **From source** | `git clone` + `cargo install --path crates/daemon` | hacking on Codrop itself |
 
 After any method, verify with `codrop --version`.
 
@@ -73,9 +74,22 @@ Grab the `.tar.xz` for your platform from the
 [latest release](https://github.com/termdx/Codrop/releases/latest), extract it, and move the
 `codrop` binary somewhere on your `PATH`.
 
+### `cargo install`
+
+Published on [crates.io](https://crates.io/crates/codrop). Requires **Rust ≥ 1.91**
+([rustup](https://rustup.rs)) — this compiles from source on your machine rather than
+downloading a prebuilt binary:
+
+```bash
+cargo install codrop
+```
+
+> If `codrop` isn't found afterwards, add Cargo's bin dir to your shell profile:
+> `export PATH="$HOME/.cargo/bin:$PATH"`.
+
 ### From source
 
-Requires **Rust ≥ 1.91** ([rustup](https://rustup.rs)).
+Hacking on Codrop itself, or want an unreleased commit:
 
 ```bash
 git clone https://github.com/termdx/Codrop.git
@@ -89,9 +103,6 @@ Or build and symlink manually (so `git pull` + rebuild stays current):
 cargo build --release                    # binaries land in target/release/
 ln -sf "$PWD/target/release/codrop" ~/.local/bin/codrop   # ensure ~/.local/bin is on PATH
 ```
-
-> If `codrop` isn't found after `cargo install`, add Cargo's bin dir to your shell profile:
-> `export PATH="$HOME/.cargo/bin:$PATH"`.
 
 ## Usage — the `codrop` daemon
 
