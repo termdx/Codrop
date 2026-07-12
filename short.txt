@@ -1,0 +1,9 @@
+Codrop is Dropbox for your dev work-in-progress.
+
+It syncs a code folder across your laptop, desktop, and cloud agents in real time—encrypted P2P, no IP addresses, no `git pull`, no copying `.env` files, no rebuilding on a stale branch.
+
+Git is for commits. Codrop is for everything between them.
+
+Stop using `git stash`, USB sticks, and desperate Slack file drops to move unfinished work.
+
+https://github.com/termdx/Codrop
