@@ -19,3 +19,9 @@ publish-jobs = ["homebrew"]
 targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]
 # Where to host releases
 hosting = "github"
+
+# Run dist's orchestration jobs (plan, build-global-artifacts, host, publish, announce) on
+# Blacksmith's faster runners. The special `global` key targets the non-build jobs; per-target
+# build runners are left at dist's defaults.
+[dist.github-custom-runners]
+global = "blacksmith-4vcpu-ubuntu-2204"
