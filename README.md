@@ -37,8 +37,8 @@ exec bits, symlinks), so Windows isn't supported. Prebuilt binaries are publishe
 | macOS | Intel (x86-64) | ✅ | `x86_64-apple-darwin` |
 | Linux | x86-64 (glibc) | ✅ | `x86_64-unknown-linux-gnu` |
 | Linux | arm64 / musl | ⚙️ from source | — (build with `cargo build --release`) |
-| Windows | any | <img width="220" height="178" alt="image" src="https://github.com/user-attachments/assets/53e8425c-17c6-4c72-a985-d76e738b134f" />
- | install WSL (give or take) |
+| Windows | any | <img width="220" height="178" alt="image" src="https://github.com/user-attachments/assets/53e8425c-17c6-4c72-a985-d76e738b134f" />  | install WSL (give or take) |
+
 
 Building from source additionally requires **Rust ≥ 1.91**.
 
