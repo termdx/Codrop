@@ -721,17 +721,32 @@ fn scan(engine: &Engine, matcher: &Matcher, root: &Path) -> Result<usize> {
     let mut count = 0;
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(&dir)? {
-            let entry = entry?;
-            let ftype = entry.file_type()?;
+        // A live tree churns while we walk it (editors, browsers, iCloud): entries can vanish
+        // between readdir and stat, and some files just aren't readable. One odd entry must
+        // never kill the daemon — skip it with a warning. Only the root itself is fatal.
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if dir == root => return Err(e.into()),
+            Err(e) => {
+                eprintln!("scan: skipping {}: {e}", dir.display());
+                continue;
+            }
+        };
+        for entry in entries {
+            let Ok(entry) = entry else { continue };
+            let Ok(ftype) = entry.file_type() else {
+                continue;
+            };
             let path = entry.path();
             let is_dir = ftype.is_dir(); // false for a symlink, even one pointing at a dir
             if matcher.is_ignored(&path, is_dir) {
                 continue;
             }
             if ftype.is_symlink() || ftype.is_file() {
-                engine.observe(&path)?;
-                count += 1;
+                match engine.observe(&path) {
+                    Ok(_) => count += 1,
+                    Err(e) => eprintln!("scan: skipping {}: {e}", path.display()),
+                }
             } else if is_dir {
                 stack.push(path);
             }

@@ -334,7 +334,9 @@ fn count_files(dir: &std::path::Path) -> usize {
 #[test]
 fn state_dir_is_gitignored() {
     let tmp = tempfile::tempdir().unwrap();
-    let (_a, root) = engine_at(&tmp, "A");
+    let root = tmp.path().join("A");
+    fs::create_dir_all(root.join(".git")).unwrap(); // make it a git checkout
+    let _a = Engine::open(&root, root.join(".codrop")).unwrap();
 
     // Opening the engine adds .codrop/ to the root .gitignore.
     let gi = fs::read_to_string(root.join(".gitignore")).unwrap();
@@ -349,6 +351,16 @@ fn state_dir_is_gitignored() {
     let gi2 = fs::read_to_string(root.join(".gitignore")).unwrap();
     assert!(gi2.contains("target/"));
     assert_eq!(gi2.matches(".codrop").count(), 1);
+}
+
+#[test]
+fn non_git_dirs_are_not_littered_with_gitignore() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_a, root) = engine_at(&tmp, "A"); // no .git here — e.g. someone's ~/Documents
+    assert!(
+        !root.join(".gitignore").exists(),
+        "must not create .gitignore outside git checkouts"
+    );
 }
 
 #[test]

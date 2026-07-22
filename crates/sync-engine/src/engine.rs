@@ -395,6 +395,12 @@ impl Engine {
 /// `.codrop/` to `<root>/.gitignore`. Idempotent and best-effort (errors are swallowed). Shared
 /// by `Engine::open` and the daemon's `id` command so both keep `.codrop` out of git.
 pub fn ignore_state_in_git(root: &Path, state_dir: &Path) {
+    // Only when the root actually is a git checkout — `.git` is a dir in a normal clone and a
+    // file in a worktree. Writing a .gitignore into arbitrary non-git folders (someone's
+    // ~/Documents) is litter, not friendliness.
+    if !root.join(".git").exists() {
+        return;
+    }
     if let Ok(rel) = state_dir.strip_prefix(root) {
         let entry = format!("{}/", rel.to_string_lossy().replace('\\', "/"));
         let _ = ensure_gitignore(root, &entry);
