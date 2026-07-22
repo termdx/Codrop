@@ -282,7 +282,13 @@ jobs:
     needs:
       - plan
       - host
-    runs-on: "blacksmith-4vcpu-ubuntu-2204"
+    # HAND-PATCHED: keep this job on a GitHub-hosted runner. Blacksmith's ubuntu image
+    # ships /home/linuxbrew owned by another user, so `brew` aborts with "Cellar is not
+    # writable" and the formula never reaches the tap (broke the v0.1.2 publish).
+    # dist's github-custom-runners.global maps ALL orchestration jobs here, with no
+    # per-job override in dist 0.32 — so `dist generate` will CLOBBER this line;
+    # re-apply it after any regeneration.
+    runs-on: "ubuntu-22.04"
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       PLAN: ${{ needs.plan.outputs.val }}
